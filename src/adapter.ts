@@ -29,6 +29,7 @@ import type {
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  PreparedAdapterCall,
   ResolvedRetryPolicy,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
@@ -429,6 +430,28 @@ export class NewApiAdapter extends LlmAdapter {
 
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     return Promise.resolve(this.config.options().models.map(model => modelInfo(provider, model)))
+  }
+
+  /**
+   * Bind exact model metadata and the eventual request dispatch to one adapter
+   * generation. The harness `ctx.llm.prepareCall()` delegates here; older
+   * `@deepseek-ai/dsh-llm` base classes (pre-0.1.x) omit this method, so we
+   * implement it explicitly to stay compatible across dsh-llm versions.
+   *
+   * @param provider - registered provider route.
+   * @param model - exact model id.
+   * @param signal - cancellation for model resolution.
+   * @returns model metadata and a one-generation stream entry point.
+   */
+  async prepareCall(
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<PreparedAdapterCall> {
+    return {
+      model: await this.resolveModel(provider, model, signal),
+      stream: (options: GenerateOptions) => this.stream(options),
+    }
   }
 
   override resolveModel(

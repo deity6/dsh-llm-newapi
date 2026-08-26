@@ -47,3 +47,8 @@ registerChannelConnParser('mygw_token', (obj) => {
 ## 版本
 
 - 在原版 `0.8.3` 基础上提升为 `0.8.4`（仅本仓库版本号，路线 id `newapi` 与 cordis patch id `llm-newapi` 保持不变，以便原地替换原版）。
+- `0.8.5`：修复 `registration.adapter.prepareCall is not a function`——dsh-llm ≥0.1.x 的宿主（agent loop 的
+  `ctx.llm.prepareCall`）要求 adapter 实现 `prepareCall(provider, model, signal)`，而 wenzetan 原版按旧 dsh-llm
+  接口编写（其基类无此方法，且插件自带的老 `@deepseek-ai/dsh-llm` 副本会在运行时抢先命中）。已在
+  `NewApiAdapter` 上**显式实现** `prepareCall`（返回 `{ model, stream }`，与新版基类默认实现同构），
+  使插件与 dsh-llm 0.0.x / 0.1.x 均兼容。回归验证：`test/prepare-call-smoke.mjs`。
