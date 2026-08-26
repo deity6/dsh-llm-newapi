@@ -66,3 +66,12 @@ registerChannelConnParser('mygw_token', (obj) => {
   鉴权失败不跑 chat 子探针（省得白费请求）。设计动机：连接/鉴权通了 ≠ chat 真能用
   （上游可能排队长、端点被 bot 防护掐），一次几 token 的 chat 实测能端到端确认真假。
   实测：seekai.cc 当前平均延迟 219s，25s 探针如实报超时。回归验证：`test/probe-chat-smoke.mjs`。
+- `0.8.8`：**设置页 UI 升级**（客户端）。新增：
+  - **测试连接按钮**：调 host `probe` RPC（草稿 baseURL/key 一次性生效、不落盘），结果卡片显示
+    可达/鉴权/模型数/延迟/HTTP 状态 + 样例模型；勾选"含 chat 实测"走 v0.8.7 的极省 token chat 探针
+    （用目录第一个模型，25s 上限）。
+  - **从描述符导入**：粘贴 `newapi_channel_conn` 格式 JSON → 调 host `parse-channel-conn` RPC →
+    自动填网关地址 + 密钥并自动跑一次探测。
+  - baseURL 字段加提示（只填到 /v1，adapter 自动拼 /chat/completions 与 /models）；
+    探测结果卡 + 导入面板样式随 `--dsw-alias-*` 令牌走明暗主题。
+  客户端类型在 `params-types.ts` 镜像 host `types.ts`（客户端 `rootDir: src/client` 不能跨目录 import）。

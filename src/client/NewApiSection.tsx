@@ -16,7 +16,13 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { DiscoveredModelView, IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-client-connection/client'
 import type { NewApiKey } from './locale.ts'
-import type { ModelsDevParamsRequest, ModelsDevParamsResponse } from './params-types.ts'
+import type {
+  ModelsDevParamsRequest,
+  ModelsDevParamsResponse,
+  ParsedChannelConn,
+  ProbeRequest,
+  ProbeResult,
+} from './params-types.ts'
 
 /**
  * One catalog entry, structurally open like the official editors: a field
@@ -123,6 +129,14 @@ export interface NewApiSectionProps {
   fetchModelParams: (
     request: ModelsDevParamsRequest,
   ) => Promise<{ ok: true; value: ModelsDevParamsResponse } | { ok: false; error: { message: string } }>
+  /** Host-side connectivity + auth probe (optionally with a chat probe). */
+  probe: (
+    request: ProbeRequest,
+  ) => Promise<{ ok: true; value: ProbeResult } | { ok: false; error: { message: string } }>
+  /** Host-side channel-connection descriptor parse. */
+  parseChannelConn: (
+    blob: unknown,
+  ) => Promise<{ ok: true; value: ParsedChannelConn } | { ok: false; error: { message: string } }>
 }
 
 const NS = 'llm-newapi'
@@ -196,6 +210,16 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   /** Chosen match index per model id, for ids with several providers. */
   const [paramChoices, setParamChoices] = useState<ReadonlyMap<string, number>>(new Map())
   const [paramsBusy, setParamsBusy] = useState(false)
+  /** Connectivity probe state: busy flag + the latest result card. */
+  const [probeBusy, setProbeBusy] = useState(false)
+  const [probeResult, setProbeResult] = useState<ProbeResult | undefined>(undefined)
+  /** Whether the probe should also run a minimal-cost chat completion. */
+  const [probeWithChat, setProbeWithChat] = useState(false)
+  /** Channel-connection descriptor import: open, draft text, busy, error. */
+  const [importOpen, setImportOpen] = useState(false)
+  const [importText, setImportText] = useState('')
+  const [importBusy, setImportBusy] = useState(false)
+  const [importError, setImportError] = useState<string | undefined>(undefined)
   /** The result panel, scrolled into view when a lookup lands. */
   const paramsRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -551,6 +575,69 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     setEditing(current => reindexOnRemove(current, index))
   }
 
+  /**
+   * Run the connectivity probe against the current drafts. Uses the form's
+   * one-shot key/base when present, falling back to the stored snapshot —
+   * testing persists nothing.
+   * @param overrides - freshly parsed facts (e.g. from an import) that have
+   *   not been committed to state yet; they beat the form values.
+   */
+  const runProbe = async (overrides?: { baseURL?: string; apiKey?: string }): Promise<void> => {
+    setProbeBusy(true)
+    setProbeResult(undefined)
+    try {
+      const base = (overrides?.baseURL ?? baseURL).trim()
+      const key = (overrides?.apiKey ?? keyDraft).trim()
+      const firstModel = models[0]
+      const chatModel = firstModel !== undefined && typeof firstModel.id === 'string' && firstModel.id.length > 0
+        ? firstModel.id
+        : undefined
+      const response = await props.probe({
+        ...base.length > 0 ? { baseURL: base } : {},
+        ...key.length > 0 ? { apiKey: key } : {},
+        ...probeWithChat && chatModel !== undefined ? { chatModel, chatTimeoutMs: 25_000 } : {},
+      })
+      if (!response.ok) {
+        setNotice(`${t('probeFailed')}: ${response.error.message}`)
+        return
+      }
+      setProbeResult(response.value)
+    } finally {
+      setProbeBusy(false)
+    }
+  }
+
+  /** Parse a pasted channel-connection descriptor, fill URL + key, then probe. */
+  const runImport = async (): Promise<void> => {
+    setImportBusy(true)
+    setImportError(undefined)
+    try {
+      let blob: unknown
+      try {
+        blob = JSON.parse(importText)
+      } catch {
+        setImportError(t('importInvalidJson'))
+        return
+      }
+      const response = await props.parseChannelConn(blob)
+      if (!response.ok) {
+        setImportError(response.error.message)
+        return
+      }
+      const value = response.value
+      setBaseURL(value.baseURL)
+      setKeyDraft(value.apiKey)
+      setImportOpen(false)
+      setImportText('')
+      setNotice(t('importApplied'))
+      // Auto-verify what was just filled; state updates are async, so pass
+      // the parsed facts directly instead of reading the new state.
+      void runProbe({ baseURL: value.baseURL, apiKey: value.apiKey })
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
   if (status === 'loading') return <section aria-label={t('nav')}><p>…</p></section>
   if (status === 'error') {
     return (
@@ -591,6 +678,95 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
           value={baseURL}
           onChange={(event) => { setBaseURL(event.target.value) }}
         />
+        <p className="newapi-hint">{t('baseUrlHint')}</p>
+      </div>
+
+      <div className="newapi-field">
+        <div className="newapi-proberow">
+          <button
+            type="button" className="newapi-button newapi-button--primary"
+            disabled={probeBusy || !writable}
+            onClick={() => { void runProbe() }}
+          >
+            {probeBusy ? t('probing') : t('probe')}
+          </button>
+          <label className="newapi-probecheck">
+            <input
+              type="checkbox" checked={probeWithChat}
+              aria-label={t('probeWithChat')}
+              onChange={(event) => { setProbeWithChat(event.target.checked) }}
+            />
+            {t('probeWithChat')}
+          </label>
+          <button
+            type="button" className="newapi-linkbutton"
+            onClick={() => { setImportOpen(current => !current); setImportError(undefined) }}
+          >
+            {t('importChannelConn')}
+          </button>
+        </div>
+
+        {importOpen ? (
+          <div className="newapi-params" style={{ marginTop: 8 }}>
+            <label className="newapi-modelfield">
+              <span className="newapi-modelfield-label">{t('importHint')}</span>
+              <textarea
+                className="newapi-input" rows={3} spellCheck={false}
+                style={{ width: '100%', resize: 'vertical', fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12 }}
+                value={importText}
+                onChange={(event) => { setImportText(event.target.value); setImportError(undefined) }}
+              />
+            </label>
+            {importError === undefined ? null : <p className="newapi-error">{importError}</p>}
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button
+                type="button" className="newapi-button newapi-button--primary"
+                disabled={importBusy || importText.trim().length === 0}
+                onClick={() => { void runImport() }}
+              >
+                {importBusy ? t('importBusy') : t('importApply')}
+              </button>
+              <button
+                type="button" className="newapi-button"
+                onClick={() => { setImportOpen(false); setImportText(''); setImportError(undefined) }}
+              >
+                {t('fetchCancel')}
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {probeResult === undefined && !probeBusy ? null : (
+          <div className="newapi-probe" aria-live="polite">
+            {probeBusy ? (
+              <p className="newapi-hint">{t('probing')}</p>
+            ) : probeResult === undefined ? null : (
+              <>
+                <p>
+                  <span className={probeResult.reachable === true && probeResult.authValid === true ? 'newapi-probe-ok' : 'newapi-probe-bad'}>
+                    {probeResult.reachable === true
+                      ? probeResult.authValid === true ? t('probeReachableAuthed') : t('probeReachableUnauthed')
+                      : t('probeUnreachable')}
+                  </span>
+                  <span className="newapi-hint">
+                    {` · ${String(probeResult.latencyMs)}ms${probeResult.modelCount !== undefined ? ` · ${String(probeResult.modelCount)} ${t('models')}` : ''}${probeResult.status !== undefined ? ` · HTTP ${String(probeResult.status)}` : ''}`}
+                  </span>
+                </p>
+                {probeResult.chat === undefined ? null : (
+                  <p className={probeResult.chat.ok ? 'newapi-probe-ok' : 'newapi-error'}>
+                    {probeResult.chat.ok
+                      ? `${t('chatProbeOk')}: ${probeResult.chat.text ?? ''} · ${String(probeResult.chat.latencyMs)}ms`
+                      : `${t('chatProbeFail')}: ${probeResult.chat.error ?? ''} · ${String(probeResult.chat.latencyMs)}ms`}
+                  </p>
+                )}
+                {probeResult.error === undefined ? null : <p className="newapi-error">{probeResult.error}</p>}
+                {probeResult.sampleModels !== undefined && probeResult.sampleModels.length > 0 ? (
+                  <p className="newapi-hint" style={{ marginTop: 4 }}>{probeResult.sampleModels.slice(0, 5).join(', ')}</p>
+                ) : null}
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <section className="newapi-catalog" aria-label={t('models')}>

@@ -34,3 +34,63 @@ export interface ModelsDevParamsResponse {
   /** Per requested id: every provider entry that matched it, in catalog order. */
   models: Array<{ id: string; matches: ModelsDevMatch[] }>
 }
+
+/** Minimal-cost chat completion probe outcome (mirrors host `types.ts`). */
+export interface ChatProbeResult {
+  /** True when the gateway returned a 2xx completion. */
+  ok: boolean
+  /** HTTP status, when a response arrived. */
+  status?: number
+  /** Round-trip latency in milliseconds. */
+  latencyMs: number
+  /** First completion text (expected to be roughly "ok"). */
+  text?: string
+  /** Wire finish reason, when reported. */
+  finishReason?: string
+  /** Human-readable failure reason when `ok` is false. */
+  error?: string
+}
+
+/** Result of the `probe` RPC endpoint (mirrors host `types.ts`). */
+export interface ProbeResult {
+  /** True when the probe completed with a usable outcome. */
+  ok: boolean
+  /** False when DNS/TLS/connection failed before any HTTP response arrived. */
+  reachable: boolean
+  /** False on 401/403; undefined when no HTTP response arrived. */
+  authValid?: boolean
+  /** HTTP status when a response arrived. */
+  status?: number
+  /** Number of models advertised via `GET /models`. */
+  modelCount?: number
+  /** A few advertised model ids, for a quick sanity check. */
+  sampleModels?: string[]
+  /** Round-trip latency in milliseconds for the `GET /models` call. */
+  latencyMs: number
+  /** Present when the caller requested a chat probe (`chatModel`). */
+  chat?: ChatProbeResult
+  /** Human-readable failure reason when `ok` is false. */
+  error?: string
+}
+
+/** Request payload of the `probe` RPC endpoint. */
+export interface ProbeRequest {
+  /** Gateway base overriding the snapshot (normalized like the config). */
+  baseURL?: string
+  /** One-shot API key overriding the stored credential (never persisted). */
+  apiKey?: string
+  /** When set, also run a minimal-cost chat probe against this model id. */
+  chatModel?: string
+  /** Time bound for the chat probe, milliseconds (host default 20_000). */
+  chatTimeoutMs?: number
+}
+
+/** Connection facts parsed from a channel-connection descriptor. */
+export interface ParsedChannelConn {
+  /** Normalized gateway base with the `/v1` prefix. */
+  baseURL: string
+  /** The API key to store under the `newapi` credentials reference. */
+  apiKey: string
+  /** Which descriptor format produced this. */
+  sourceType: string
+}

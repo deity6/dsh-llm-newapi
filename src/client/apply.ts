@@ -13,7 +13,13 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client
 import { NewApiSection } from './NewApiSection.tsx'
 import type { NewApiKey } from './locale.ts'
 import { en, zh } from './locale.ts'
-import type { ModelsDevParamsRequest, ModelsDevParamsResponse } from './params-types.ts'
+import type {
+  ModelsDevParamsRequest,
+  ModelsDevParamsResponse,
+  ParsedChannelConn,
+  ProbeRequest,
+  ProbeResult,
+} from './params-types.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -62,6 +68,16 @@ const SECTION_CSS = `
 .newapi-button--primary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
 .newapi-error { color: var(--dsw-alias-state-error-primary); }
 .newapi-hint { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+/* Connectivity probe row + result card. */
+.newapi-proberow { display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 10px; }
+.newapi-probecheck { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.newapi-probe {
+  margin: 10px 0 2px; padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px;
+  font-size: 12px; line-height: 18px; background: var(--dsw-alias-bg-layer-1);
+}
+.newapi-probe-ok { color: var(--dsw-alias-brand-primary); font-weight: 500; }
+.newapi-probe-bad { color: var(--dsw-alias-state-error-primary); font-weight: 500; }
 /* Model catalog, mirroring ui-settings-models: one bordered entry per
    model, id and display name on the row, capacities behind the row's own
    disclosure. */
@@ -203,11 +219,27 @@ export function apply(ctx: ClientContext): void {
       { ok: true; value: ModelsDevParamsResponse } | { ok: false; error: { message: string } }
     >
 
+  // Connectivity + auth probe: the host normalizes the drafted base, resolves
+  // the one-shot key (or the stored credential), and calls GET /models
+  // (optionally followed by a minimal-cost chat probe when chatModel is set).
+  const probe = (request: ProbeRequest) =>
+    connection.rpc.call('/llm-newapi', 'probe', request) as Promise<
+      { ok: true; value: ProbeResult } | { ok: false; error: { message: string } }
+    >
+
+  // Channel-connection descriptor import: the host parses a pasted
+  // newapi_channel_conn-style blob into { baseURL, apiKey } — no
+  // descriptor-format logic leaks into the browser.
+  const parseChannelConn = (blob: unknown) =>
+    connection.rpc.call('/llm-newapi', 'parse-channel-conn', blob) as Promise<
+      { ok: true; value: ParsedChannelConn } | { ok: false; error: { message: string } }
+    >
+
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'newapi',
     order: 15,
     label: () => t('nav'),
-    inject: () => ({ api: connection.api, t, fetchModelParams }),
+    inject: () => ({ api: connection.api, t, fetchModelParams, probe, parseChannelConn }),
   }, NewApiSection))
 }
