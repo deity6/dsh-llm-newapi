@@ -1,0 +1,6 @@
+node_modules/
+package-lock.json
+probe-smoke.mjs
+.git-commit-msg.tmp
+.selfcheck/
+.cache/

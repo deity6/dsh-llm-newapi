@@ -1,0 +1,382 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: 'Promote a green pre-release tag to its stable twin on the same commit (e.g. v0.8.2-rc.5 -> v0.8.2). Leave empty to only run the gates.'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Typecheck (host + client)
+        run: npm run typecheck
+      - name: Build (lib/index.js + lib/client.js)
+        run: npm run build
+      - name: Committed artifacts are current
+        run: |
+          git diff --exit-code -- lib/ || {
+            echo "::error::lib/ is stale — run 'npm run build' and commit the rebuilt artifacts (github: installs build from the committed lib/)"
+            exit 1
+          }
+      - name: Tests (client component suite + cordis composition smoke)
+        run: npm test
+      - name: Pack distribution tarball
+        run: npm pack
+      - name: Packed tarball is self-contained
+        run: |
+          # The profile install runs with autoInstallPeers: false; at runtime
+          # the dsh host supplies the @deepseek-ai/* seam packages (and react
+          # on the browser side). Everything ELSE the packed host bundle
+          # imports must resolve from the tarball's own dependency list —
+          # resolving through this repository's node_modules is what let a
+          # missing dependency ship (v0.5.0's undici).
+          mkdir /tmp/selfcheck && tar -xzf dsh-llm-newapi-*.tgz -C /tmp/selfcheck
+          cd /tmp/selfcheck/package
+          npm install --omit=dev --no-audit --no-fund --ignore-scripts
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs'
+            const source = readFileSync('lib/index.js', 'utf8')
+            const specifiers = [...source.matchAll(/from\s+[\"']([^\"']+)[\"']/g)]
+              .map(m => m[1]).filter(s => !s.startsWith('.') && !s.startsWith('node:'))
+            const hostProvided = s => s === 'react' || s.startsWith('@deepseek-ai/')
+            const own = [...new Set(specifiers)].filter(s => !hostProvided(s))
+            const missing = own.filter(s => {
+              try { import.meta.resolve(s, new URL('./lib/index.js', import.meta.url)); return false }
+              catch { return true }
+            })
+            if (missing.length > 0) {
+              console.error('imports not resolvable from the packed tarball (add to dependencies): ' + missing.join(', '))
+              process.exit(1)
+            }
+            console.log('self-contained: ' + own.join(', '))
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dsh-llm-newapi-*.tgz
+          if-no-files-found: error
+
+  # Compliance gate: run the dsh-plugin-check diagnostics (manifest
+  # protocol / patch format / build pitfalls) over this repository and
+  # require a pass verdict. The checker is cloned and built from its own
+  # repo; its exported checkRepo() is a read-only static scan, so this job
+  # only needs a checkout and the committed lib/ layout.
+  plugin-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Clone and build dsh-plugin-check
+        run: |
+          git clone --depth 1 https://github.com/omdsh-dev/dsh-plugin-check /tmp/pc
+          npm install -g @deepseek-ai/dsh >/dev/null
+          cd /tmp/pc
+          npm install --no-audit --no-fund --ignore-scripts
+          # The built entry imports @deepseek-ai/dsh-tools at runtime
+          # (defineTool). Installing those rc peers alongside the checker's
+          # own tree crashes both npm and pnpm (peer pins conflict across rc
+          # lines), so borrow them as symlinks from the global dsh install:
+          # ESM resolves the real path, and the checker's transitive needs
+          # resolve from dsh's own complete tree.
+          DSHNM="$(npm root -g)/@deepseek-ai/dsh/node_modules"
+          mkdir -p node_modules/@deepseek-ai
+          for pkg in dsh-tools dsh-invariants cordis; do
+            ln -s "$DSHNM/@deepseek-ai/$pkg" "node_modules/@deepseek-ai/$pkg"
+          done
+          npm run build
+      - name: plugin_check verdict is pass
+        run: |
+          node --input-type=module -e "
+            const m = await import('/tmp/pc/lib/index.js')
+            const report = await m.checkRepo(process.cwd(), false)
+            console.log(JSON.stringify(report, null, 2))
+            if (report.verdict !== 'pass') {
+              console.error('::error::dsh-plugin-check verdict: ' + report.verdict)
+              process.exit(1)
+            }
+          "
+
+  # Real-boot gate: install the packed tarball through the dsh CLI into a
+  # fresh DSH_HOME and require `dsh web` to boot serving the plugin. This is
+  # the check that would have caught both shipped breakages: v0.5.0 (a peer
+  # the host does not provide made the whole plugin tree fail to load) and
+  # v0.5.2 (the RPC channel silently never registered, so the browser met
+  # the SPA fallback's 405).
+  boot:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install dsh and pnpm
+        run: npm install -g @deepseek-ai/dsh pnpm
+      - name: Install the packed tarball into a fresh web profile
+        run: |
+          set -euo pipefail
+          export DSH_HOME="$RUNNER_TEMP/dsh-home"
+          mkdir -p "$DSH_HOME"
+          TARBALL="$(pwd)/$(ls dsh-llm-newapi-*.tgz)"
+          dsh plugin --profile web add "$TARBALL"
+          PROFILE="$DSH_HOME/profiles/web/package.json"
+          if [ ! -f "$PROFILE" ]; then
+            echo "::error::dsh plugin add did not scaffold the web profile at $PROFILE"
+            find "$DSH_HOME" -maxdepth 3
+            exit 1
+          fi
+          # Register the bundle row (the documented install step 2), keeping
+          # whatever rows the scaffold already wrote.
+          node -e '
+            const fs = require("node:fs")
+            const path = process.env.DSH_HOME + "/profiles/web/package.json"
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"))
+            pkg.dsh ??= {}
+            pkg.dsh.profile ??= {}
+            pkg.dsh.profile.bundles ??= ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
+            for (const row of ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-llm-newapi"]) {
+              if (!pkg.dsh.profile.bundles.includes(row)) pkg.dsh.profile.bundles.push(row)
+            }
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n")
+            console.log("bundles:", pkg.dsh.profile.bundles.join(", "))
+          '
+      - name: dsh web boots and serves the plugin
+        run: |
+          set -euo pipefail
+          export DSH_HOME="$RUNNER_TEMP/dsh-home"
+          LOG="$RUNNER_TEMP/dsh-web.log"
+          dsh web > "$LOG" 2>&1 &
+          WEB_PID=$!
+          trap 'kill "$WEB_PID" 2>/dev/null || true' EXIT
+          code=""
+          for _ in $(seq 1 120); do
+            if ! kill -0 "$WEB_PID" 2>/dev/null; then
+              echo "::error::dsh web exited during startup"
+              cat "$LOG"
+              exit 1
+            fi
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080/ || true)"
+            [ "$code" = "200" ] && break
+            sleep 1
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error::dsh web did not become ready on :3080"
+            cat "$LOG"
+            exit 1
+          fi
+          echo "web ready on :3080"
+          # The plugin's browser half is served for the module loader.
+          client="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3080/plugins/dsh-llm-newapi/client.js")"
+          if [ "$client" != "200" ]; then
+            echo "::error::client bundle not served (HTTP $client)"
+            cat "$LOG"
+            exit 1
+          fi
+          # The plugin's RPC channel exists: any answer but 405 proves the
+          # route registered (405 is the SPA fallback rejecting a POST).
+          rpc="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            http://127.0.0.1:3080/llm-newapi/models-dev-params \
+            -H 'content-type: application/json' \
+            -d '{"type":"client-request","rpcId":"ci-boot","method":"models-dev-params","payload":{"modelIds":[]}}')"
+          if [ "$rpc" = "405" ]; then
+            echo "::error::RPC channel /llm-newapi missing (405) — the channel did not register"
+            cat "$LOG"
+            exit 1
+          fi
+          echo "boot gate passed: web ready, client bundle HTTP $client, RPC channel HTTP $rpc"
+
+  # A tag like v0.8.2-rc.1 publishes as a TEST version everywhere: GitHub
+  # Release marked pre-release, npm under the `next` dist-tag. The stable
+  # `latest` / full release only ever comes from a suffix-free vX.Y.Z tag,
+  # and those tags are created exclusively by the promote job below (a
+  # manual confirmation step) — pushing one by hand is the process smell the
+  # promotion flow replaces.
+  release:
+    needs: [build, plugin-check, boot]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    outputs:
+      prerelease: ${{ steps.channel.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+      - name: Decide the release channel
+        id: channel
+        run: |
+          # Any hyphen in the tag (rc/beta/…) marks a test version.
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "npm_tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "npm_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create GitHub Release with the built tarball
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dsh-llm-newapi-*.tgz
+          generate_release_notes: true
+          prerelease: ${{ steps.channel.outputs.prerelease }}
+      - name: Publish to npm (optional, only when NPM_TOKEN is configured)
+        if: env.NPM_TOKEN != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm publish
+        if: env.NPM_TOKEN != ''
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          if npm view "dsh-llm-newapi@$VER" version --silent >/dev/null 2>&1; then
+            echo "already published $VER — skipping (rerun-safe)"
+          else
+            npm publish dsh-llm-newapi-*.tgz --access public --tag "${{ steps.channel.outputs.npm_tag }}"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # npm assigns the `latest` dist-tag to the very first version published
+      # even when publishing under --tag next (v0.8.2-rc.4 shipped that way).
+      # latest cannot be deleted (registry 403) — only re-assigned; the
+      # step below re-claims it to the newest stable already published,
+      # or warns when none exists yet (the next promote re-claims it).
+      - name: Prerelease must not own the latest dist-tag
+        if: env.NPM_TOKEN != '' && steps.channel.outputs.npm_tag == 'next'
+        run: |
+          # npm forbids DELETING the latest dist-tag (403) — it can only be
+          # re-assigned. npm assigns latest to the very first published
+          # version even under --tag next (v0.8.2-rc.4 shipped that way), so
+          # when this rc publish leaves latest pointing at a -suffixed
+          # version, re-claim it to the newest stable already on the
+          # registry if one exists. With no stable published yet, only warn:
+          # the next promote/stable release re-claims latest itself.
+          LATEST="$(npm dist-tag ls dsh-llm-newapi | sed -n 's/^latest: //p')"
+          if [ -n "$LATEST" ] && [[ "$LATEST" == *-* ]]; then
+            STABLE="$(npm dist-tag ls dsh-llm-newapi | sed -n 's/^[^:]*: //p' | grep -v -- '-' | sort -V | tail -1)"
+            if [ -n "$STABLE" ]; then
+              npm dist-tag add "dsh-llm-newapi@$STABLE" latest
+              echo "re-claimed latest: $LATEST -> $STABLE"
+            else
+              echo "::warning::latest=$LATEST points at a prerelease and no stable version exists yet — the next promote will re-claim latest"
+            fi
+          else
+            echo "latest untouched (${LATEST:-<unset>})"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Manual confirmation: promote a green pre-release tag to its stable
+  # vX.Y.Z on the same commit. The pushed stable tag then flows through the
+  # ordinary release job as a full release + npm latest.
+  promote:
+    if: github.event_name == 'workflow_dispatch' && inputs.rc_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write  # gh run list + gh workflow run (verify CI, dispatch release)
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate the rc tag and create its stable twin
+        id: promote
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC: ${{ inputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RC" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.]+$ ]]; then
+            echo "::error::$RC is not a pre-release tag (expected vX.Y.Z-rc.N or similar)"
+            exit 1
+          fi
+          STABLE="v${RC#v}"; STABLE="${STABLE%%-*}"
+          SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RC}" --jq '.object.sha')"
+          # Annotated tags peel to a tag object, not the commit: dereference
+          # once so SHA is the commit the CI run list can match on.
+          if [ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RC}" --jq '.object.type')" = "tag" ]; then
+            SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${SHA}" --jq '.object.sha')"
+          fi
+          echo "promoting $RC ($SHA) -> $STABLE"
+          # The rc push (not any workflow_dispatch, e.g. this very promote)
+          # must have finished green on exactly this commit.
+          CONCLUSION="$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$SHA" --event push --workflow CI --limit 1 --json conclusion --jq '.[0].conclusion // "none"')"
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::CI for $RC is '$CONCLUSION' (need success) — fix or re-tag before promoting"
+            exit 1
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${STABLE}" >/dev/null 2>&1; then
+            echo "::error::$STABLE already exists — bump the version instead"
+            exit 1
+          fi
+          # The stable tag must point at a commit whose package.json carries
+          # the stable version: npm refuses to publish a tarball version
+          # that already exists (the rc version), so bump package.json to
+          # the stable version on top of the confirmed rc commit, commit it
+          # to main, and point the stable tag at that commit.
+          # The stable tag must point at a commit whose package.json carries
+          # the stable version: npm refuses to publish a tarball version
+          # that already exists (the rc version), so bump package.json to
+          # the stable version on top of the confirmed rc commit, commit it
+          # to main, and point the stable tag at that commit. Idempotent:
+          # if a previous attempt already landed the bump on main, just
+          # reuse that commit.
+          if [ "$(node -p 'require("./package.json").version')" != "${STABLE#v}" ]; then
+            npm version "${STABLE#v}" --no-git-tag-version >/dev/null
+            git add package.json package-lock.json 2>/dev/null || git add package.json
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "$STABLE" >/dev/null
+            git push origin main
+            echo "bumped to $STABLE on main"
+          else
+            echo "package.json already at $STABLE - reusing the main commit"
+          fi
+          SHA="$(git rev-parse HEAD)"
+          # Local annotated tag on the confirmed commit, then push. A tag
+          # pushed with GITHUB_TOKEN does NOT trigger the tags:['v*']
+          # workflow (GitHub's recursion guard), so the release run is
+          # dispatched explicitly in the next step.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$STABLE" -m "$STABLE (promoted from $RC)" "$SHA"
+          git push origin "$STABLE"
+          echo "created $STABLE — stable release pipeline starting"
+          # Keep the moving `latest` tag on the newest confirmed stable so
+          # `github:wenzetan/dsh-llm-newapi#latest` stays a valid dynamic
+          # install reference (same semantics as npm's latest dist-tag).
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/latest" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/latest" \
+              -f sha="$SHA" -F force=true >/dev/null
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/latest" -f sha="$SHA" >/dev/null
+          fi
+          echo "moved latest tag -> $STABLE ($SHA)"
+          echo "stable_tag=$STABLE" >> "$GITHUB_OUTPUT"
+      - name: Trigger the release run on the stable tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STABLE: ${{ steps.promote.outputs.stable_tag }}
+        run: gh workflow run ci.yml --ref "$STABLE"
