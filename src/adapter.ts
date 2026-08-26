@@ -40,6 +40,7 @@ import { serializeRequest } from './serialize.ts'
 import { parseSse } from './sse.ts'
 import { translate } from './translate.ts'
 import type {
+  ChatProbeResult,
   ModelsDevApi,
   ModelsDevMatch,
   ModelsDevModel,
@@ -155,6 +156,8 @@ export interface NewApiAdapterOptions {
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+/** Default time bound for the optional minimal chat probe. */
+const CHAT_PROBE_DEFAULT_TIMEOUT_MS = 20_000
 /** Default context capacity when neither the catalog nor config names one. */
 export const DEFAULT_CONTEXT_WINDOW = 128_000
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
@@ -614,14 +617,17 @@ export class NewApiAdapter extends LlmAdapter {
   /**
    * Connectivity + auth probe of one gateway endpoint. The web section (and
    * any importer of a channel-connection descriptor) calls this to confirm a
-   * pasted endpoint actually serves models before saving it. The probe uses
-   * `GET /v1/models` — not a chat completion — because some newapi-based
+   * pasted endpoint actually serves models before saving it. The base probe
+   * uses `GET /v1/models` — not a chat completion — because some newapi-based
    * deployments put their chat endpoint behind bot protection (e.g. Cloudflare
    * Turnstile) that blocks scripted inference while still answering the models
    * listing, so a models-based probe reports a usable "reachable + auth OK"
-   * signal the chat endpoint would falsely fail. A draft supplies its own base
-   * and one-shot credential; otherwise both come from the current snapshot.
-   * @param request - the probe draft (base, one-shot key, cancellation).
+   * signal the chat endpoint would falsely fail. When the caller names a
+   * `chatModel`, an OPTIONAL minimal-cost chat completion probe
+   * ("Reply with exactly: ok", max_tokens 5) also runs — see
+   * {@link probeChat}. A draft supplies its own base and one-shot credential;
+   * otherwise both come from the current snapshot.
+   * @param request - the probe draft (base, one-shot key, optional chat probe, cancellation).
    * @returns a structured {@link ProbeResult} — never throws.
    */
   async probeConnection(request: ProbeRequest): Promise<ProbeResult> {
@@ -689,7 +695,103 @@ export class NewApiAdapter extends LlmAdapter {
         result.sampleModels = []
       }
     }
+    // Optional minimal-cost chat probe: proves the gateway completes a real
+    // conversation turn, not just the models listing. Runs only after auth
+    // succeeded (a rejected key would waste the request) and only when the
+    // caller named a chat model. Billed a handful of tokens at most.
+    if (result.authValid === true && request.chatModel !== undefined) {
+      result.chat = await this.probeChat(base, apiKey, connection, request)
+    }
     return result
+  }
+
+  /**
+   * One minimal chat-completion probe: `POST /chat/completions` asking the
+   * model to reply "ok" with `max_tokens: 5`, bounded by the caller's
+   * `chatTimeoutMs` (default 20s). Never throws; every failure is returned
+   * as a structured {@link ChatProbeResult}.
+   * @param base - normalized gateway base (chat path appended here).
+   * @param apiKey - the resolved probe credential.
+   * @param connection - connection snapshot (carries the forward proxy).
+   * @param request - the probe draft (chat model, timeout, cancellation).
+   * @returns the chat outcome — never throws.
+   */
+  private async probeChat(
+    base: string,
+    apiKey: string,
+    connection: NewApiConnectionOptions,
+    request: ProbeRequest,
+  ): Promise<ChatProbeResult> {
+    const chatStarted = Date.now()
+    const timeoutMs = request.chatTimeoutMs ?? CHAT_PROBE_DEFAULT_TIMEOUT_MS
+    const controller = new AbortController()
+    const onAbort = () => controller.abort()
+    request.signal?.addEventListener('abort', onAbort, { once: true })
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await gatewayFetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          'content-type': 'application/json',
+          accept: 'application/json',
+          ...attributionHeaders(),
+        },
+        body: JSON.stringify({
+          model: request.chatModel,
+          messages: [{ role: 'user', content: 'Reply with exactly: ok' }],
+          max_tokens: 5,
+          stream: false,
+        }),
+        signal: controller.signal,
+      }, connection.proxyUrl)
+      const latencyMs = Date.now() - chatStarted
+      let body: {
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>
+        error?: { message?: string }
+      } = {}
+      try {
+        body = await response.json() as typeof body
+      } catch {
+        // Non-JSON error page (e.g. a Cloudflare challenge): status still
+        // identifies the failure, message falls back to the HTTP status.
+      }
+      if (!response.ok) {
+        return {
+          ok: false,
+          status: response.status,
+          latencyMs,
+          error: body.error?.message ?? `HTTP ${response.status}`,
+        }
+      }
+      const choice = body.choices?.[0]
+      return {
+        ok: true,
+        status: response.status,
+        latencyMs,
+        ...choice?.message?.content !== undefined ? { text: choice.message.content } : {},
+        ...choice?.finish_reason !== undefined ? { finishReason: choice.finish_reason } : {},
+      }
+    } catch (error: unknown) {
+      const latencyMs = Date.now() - chatStarted
+      if (request.signal?.aborted) {
+        return { ok: false, latencyMs, error: 'chat probe aborted' }
+      }
+      if (controller.signal.aborted) {
+        return {
+          ok: false,
+          latencyMs,
+          error: `chat probe timed out after ${Math.round(timeoutMs / 1000)}s`,
+        }
+      }
+      const cause = error instanceof Error && error.cause instanceof Error
+        ? error.cause.message
+        : error instanceof Error ? error.message : String(error)
+      return { ok: false, latencyMs, error: `chat probe failed: ${cause}` }
+    } finally {
+      clearTimeout(timer)
+      request.signal?.removeEventListener('abort', onAbort)
+    }
   }
 
   /**

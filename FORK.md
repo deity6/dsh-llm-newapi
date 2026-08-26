@@ -59,3 +59,10 @@ registerChannelConnParser('mygw_token', (obj) => {
   代理 agent 按 URL 缓存复用（避免流式响应中途被关）。实测：直连 probe 403 → 走 Clash 代理 200 /
   20 模型 / authValid=true。回归验证：`test/proxy-smoke.mjs`（直连 vs 代理对比 + chat 流）。
   注：若代理不可达，报错信息会提示检查 Clash 是否在跑（沿用 models.dev 下载的既有提示风格）。
+- `0.8.7`：**探针支持极省 token 的 chat 实测**。`ProbeRequest` 新增 `chatModel?` / `chatTimeoutMs?`：
+  传了 `chatModel` 才在 models 检查通过后追加一次最小 chat 调用
+  （`"Reply with exactly: ok"` + `max_tokens: 5`，默认 20s 上限），返回 `ProbeResult.chat`
+  （`{ ok, status, latencyMs, text, finishReason, error }`）；不传则保持原免费 models-only 行为。
+  鉴权失败不跑 chat 子探针（省得白费请求）。设计动机：连接/鉴权通了 ≠ chat 真能用
+  （上游可能排队长、端点被 bot 防护掐），一次几 token 的 chat 实测能端到端确认真假。
+  实测：seekai.cc 当前平均延迟 219s，25s 探针如实报超时。回归验证：`test/probe-chat-smoke.mjs`。

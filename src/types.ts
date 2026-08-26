@@ -251,6 +251,33 @@ export interface ProbeResult {
   sampleModels?: string[]
   /** Round-trip latency in milliseconds for the `GET /models` call. */
   latencyMs: number
+  /**
+   * Minimal-cost chat completion check, present only when the caller named a
+   * `chatModel`. Billed a handful of tokens at most (max_tokens 5).
+   */
+  chat?: ChatProbeResult
+  /** Human-readable failure reason when `ok` is false. */
+  error?: string
+}
+
+/**
+ * One minimal chat-completion probe (`POST /chat/completions` with a
+ * "Reply with exactly: ok" prompt and `max_tokens: 5`). The goal is the
+ * cheapest possible end-to-end check that the gateway actually completes a
+ * conversation turn, not a meaningful model eval — so every field is
+ * deliberately small.
+ */
+export interface ChatProbeResult {
+  /** True when the gateway returned a 2xx completion. */
+  ok: boolean
+  /** HTTP status, when a response arrived. */
+  status?: number
+  /** Round-trip latency in milliseconds for the chat completion. */
+  latencyMs: number
+  /** First completion text (expected to be roughly "ok"). */
+  text?: string
+  /** Wire finish reason, when the completion reported one. */
+  finishReason?: string
   /** Human-readable failure reason when `ok` is false. */
   error?: string
 }
@@ -267,4 +294,12 @@ export interface ProbeRequest {
   apiKey?: string
   /** Caller cancellation. */
   signal?: AbortSignal
+  /**
+   * When set, also run a minimal-cost chat completion probe against this
+   * model id ("Reply with exactly: ok", `max_tokens: 5`). Absent, the probe
+   * stays free (models listing only).
+   */
+  chatModel?: string
+  /** Time bound for the chat probe, milliseconds (default 20_000). */
+  chatTimeoutMs?: number
 }
