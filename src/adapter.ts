@@ -122,8 +122,9 @@ export interface NewApiConnectionOptions {
   /** Maximum provider idle time while one stream read is outstanding. */
   streamIdleTimeoutMs: number
   /**
-   * Forward proxy for the models.dev catalog download; present only while
-   * the proxy setting is enabled, so its absence means a direct fetch.
+   * Forward proxy covering every gateway request — chat completions, model
+   * discovery, probes, and the models.dev catalog download; present only
+   * while the proxy setting is enabled, so its absence means a direct fetch.
    */
   proxyUrl?: string
   /** Match-shaping hints for the models.dev params lookup. */
@@ -409,6 +410,38 @@ export function httpErrorCode(status: number, error?: WireError['error']): strin
 }
 
 /**
+ * Cached forward-proxy agents, one per proxy URL. Gateway streams must keep
+ * their connection pool alive for the whole response body, so agents are
+ * cached for the process lifetime instead of being minted and closed around
+ * a single fetch (the models.dev download closes its per-request agent).
+ */
+const PROXY_AGENTS = new Map<string, ProxyAgent>()
+
+function proxyAgentFor(proxyUrl: string): ProxyAgent {
+  let agent = PROXY_AGENTS.get(proxyUrl)
+  if (agent === undefined) {
+    agent = new ProxyAgent(proxyUrl)
+    PROXY_AGENTS.set(proxyUrl, agent)
+  }
+  return agent
+}
+
+/**
+ * Fetch a gateway resource, routing through the configured forward proxy
+ * when one is enabled. The global `fetch` brand-checks `dispatcher` against
+ * its internal undici instance and rejects a ProxyAgent minted by the npm
+ * package, so proxied requests must use the imported undici fetch.
+ */
+function gatewayFetch(
+  url: string,
+  init: RequestInit,
+  proxyUrl: string | undefined,
+): Promise<Response> {
+  if (proxyUrl === undefined || proxyUrl.length === 0) return fetch(url, init)
+  return undiciFetch(url, { ...init, dispatcher: proxyAgentFor(proxyUrl) })
+}
+
+/**
  * The NewAPI gateway adapter. One instance serves every model name it was
  * registered under (the harness model name IS the wire model name).
  *
@@ -516,7 +549,7 @@ export class NewApiAdapter extends LlmAdapter {
       : await this.config.resolveApiKey(connection)
     let response: Response
     try {
-      response = await fetch(`${base}/models`, {
+      response = await gatewayFetch(`${base}/models`, {
         method: 'GET',
         headers: {
           'authorization': `Bearer ${apiKey}`,
@@ -524,7 +557,7 @@ export class NewApiAdapter extends LlmAdapter {
           ...attributionHeaders(),
         },
         ...request.signal === undefined ? {} : { signal: request.signal },
-      })
+      }, connection.proxyUrl)
     } catch (error: unknown) {
       if (request.signal?.aborted) throw error
       throw new LlmError(`NewAPI model discovery request to ${base} failed`, 'TRANSPORT', { cause: error })
@@ -614,7 +647,7 @@ export class NewApiAdapter extends LlmAdapter {
     }
     let response: Response
     try {
-      response = await fetch(`${base}/models`, {
+      response = await gatewayFetch(`${base}/models`, {
         method: 'GET',
         headers: {
           authorization: `Bearer ${apiKey}`,
@@ -622,7 +655,7 @@ export class NewApiAdapter extends LlmAdapter {
           ...attributionHeaders(),
         },
         ...request.signal === undefined ? {} : { signal: request.signal },
-      })
+      }, connection.proxyUrl)
     } catch (error: unknown) {
       const latencyMs = Date.now() - started
       if (request.signal?.aborted) {
@@ -836,12 +869,12 @@ export class NewApiAdapter extends LlmAdapter {
 
     let response: Response
     try {
-      response = await fetch(`${connection.baseURL}/chat/completions`, {
+      response = await gatewayFetch(`${connection.baseURL}/chat/completions`, {
         method: 'POST',
         headers,
         body: payload,
         signal,
-      })
+      }, connection.proxyUrl)
     } catch (error: unknown) {
       // The outer stream distinguishes caller cancellation and watchdog expiry.
       if (signal.aborted) throw error

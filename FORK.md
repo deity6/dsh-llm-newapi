@@ -52,3 +52,10 @@ registerChannelConnParser('mygw_token', (obj) => {
   接口编写（其基类无此方法，且插件自带的老 `@deepseek-ai/dsh-llm` 副本会在运行时抢先命中）。已在
   `NewApiAdapter` 上**显式实现** `prepareCall`（返回 `{ model, stream }`，与新版基类默认实现同构），
   使插件与 dsh-llm 0.0.x / 0.1.x 均兼容。回归验证：`test/prepare-call-smoke.mjs`。
+- `0.8.6`：**forward proxy 覆盖全部 gateway 流量**。原版（以及 0.8.4/0.8.5）的 `proxy` 只作用于
+  models.dev 目录下载，chat / 模型发现 / 探针仍是裸 fetch——对 seekai.cc 这类按 TLS/JA3 指纹拦截 Node
+  的 Cloudflare 站点，会导致 discovery 403、chat 被掐。现在 `gatewayFetch()` 助手把 `proxyUrl`
+  （设置页勾选启用时注入 connection）应用到 chat-completions、/models、probe 全部三条 gateway 路径，
+  代理 agent 按 URL 缓存复用（避免流式响应中途被关）。实测：直连 probe 403 → 走 Clash 代理 200 /
+  20 模型 / authValid=true。回归验证：`test/proxy-smoke.mjs`（直连 vs 代理对比 + chat 流）。
+  注：若代理不可达，报错信息会提示检查 Clash 是否在跑（沿用 models.dev 下载的既有提示风格）。
