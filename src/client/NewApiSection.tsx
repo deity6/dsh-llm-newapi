@@ -57,6 +57,18 @@ function numberOf(model: ModelDraft, key: string): number | undefined {
   return typeof value === 'number' ? value : undefined
 }
 
+/** Normalize a stored proxy block onto the draft's mode + url pair. */
+function proxyOf(value: unknown): { mode: InstanceProxyMode; url: string } {
+  const proxy = (value ?? {}) as { mode?: unknown; enabled?: unknown; url?: unknown }
+  const mode = proxy.mode === 'custom' || proxy.mode === 'direct' || proxy.mode === 'system'
+    ? proxy.mode
+    : (proxy.enabled === true ? 'custom' : 'direct')
+  return {
+    mode,
+    url: typeof proxy.url === 'string' && proxy.url.length > 0 ? proxy.url : DEFAULT_PROXY_URL,
+  }
+}
+
 /** Convert the stored section value into editable drafts, legacy-aware. */
 function toDrafts(source: unknown): InstanceDraft[] {
   if (typeof source !== 'object' || source === null) return []
@@ -70,7 +82,7 @@ function toDrafts(source: unknown): InstanceDraft[] {
   // Legacy flat section: one `default` instance.
   const hasLegacy = typeof value.baseURL === 'string' || Array.isArray(value.models)
   if (!hasLegacy) return []
-  const proxy = (value.proxy ?? {}) as { enabled?: unknown; url?: unknown }
+  const proxy = proxyOf(value.proxy)
   return [{
     id: 'default',
     displayName: 'NewAPI',
@@ -78,13 +90,13 @@ function toDrafts(source: unknown): InstanceDraft[] {
     models: Array.isArray(value.models)
       ? value.models.filter(entry => typeof entry === 'object' && entry !== null && !Array.isArray(entry)) as ModelDraft[]
       : [],
-    proxyEnabled: proxy.enabled === true,
-    proxyUrl: typeof proxy.url === 'string' && proxy.url.length > 0 ? proxy.url : DEFAULT_PROXY_URL,
+    proxyMode: proxy.mode,
+    proxyUrl: proxy.url,
   }]
 }
 
 function draftOf(entry: Record<string, unknown>): InstanceDraft {
-  const proxy = (entry.proxy ?? {}) as { enabled?: unknown; url?: unknown }
+  const proxy = proxyOf(entry.proxy)
   return {
     id: typeof entry.id === 'string' ? entry.id : '',
     displayName: typeof entry.displayName === 'string' ? entry.displayName : '',
@@ -92,8 +104,8 @@ function draftOf(entry: Record<string, unknown>): InstanceDraft {
     models: Array.isArray(entry.models)
       ? entry.models.filter(model => typeof model === 'object' && model !== null && !Array.isArray(model)) as ModelDraft[]
       : [],
-    proxyEnabled: proxy.enabled === true,
-    proxyUrl: typeof proxy.url === 'string' && proxy.url.length > 0 ? proxy.url : DEFAULT_PROXY_URL,
+    proxyMode: proxy.mode,
+    proxyUrl: proxy.url,
   }
 }
 
@@ -103,7 +115,7 @@ function blankDraft(): InstanceDraft {
     displayName: '',
     baseURL: '',
     models: [],
-    proxyEnabled: false,
+    proxyMode: 'system',
     proxyUrl: DEFAULT_PROXY_URL,
   }
 }
@@ -131,14 +143,21 @@ function serializeInstance(draft: InstanceDraft): Record<string, unknown> {
       ...preset !== undefined ? { defaultReasoningEffort: preset } : {},
     }
   })
+  const id = sanitizeClientId(draft.id)
   return {
-    id: sanitizeClientId(draft.id),
+    id,
+    // Persist the credential reference name: the official Models page only
+    // joins credentials whose `apiKeyEnv` the stored profile names, so
+    // writing it here is what lights up its configured/missing dot.
+    apiKeyEnv: clientRefOf(id),
     ...draft.displayName.trim().length > 0 ? { displayName: draft.displayName.trim() } : {},
     ...draft.baseURL.trim().length > 0 ? { baseURL: draft.baseURL.trim() } : {},
     models,
     proxy: {
-      enabled: draft.proxyEnabled,
-      url: draft.proxyUrl.trim().length > 0 ? draft.proxyUrl.trim() : DEFAULT_PROXY_URL,
+      mode: draft.proxyMode,
+      ...draft.proxyMode === 'custom' && draft.proxyUrl.trim().length > 0
+        ? { url: draft.proxyUrl.trim() }
+        : {},
     },
   }
 }

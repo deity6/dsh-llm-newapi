@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-newapi",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "NewAPI (OpenAI-compatible gateway) chat-completions adapter for the DeepSeek Harness LLM seam. 二改自 wenzetan/dsh-llm-newapi: 增加 newapi_channel_conn 渠道连接描述符解析（可扩展注册其他 newapi 原型站点）、host 端探针(probe)、显式 prepareCall 兼容 dsh-llm >=0.1.x，并将 forward proxy 覆盖到全部 gateway 流量（chat/discovery/probe）。Provider route id 'newapi', display name 'NewAPI'.",
   "type": "module",
   "author": "Deity",

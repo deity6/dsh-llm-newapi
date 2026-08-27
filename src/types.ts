@@ -256,6 +256,11 @@ export interface ProbeResult {
    * `chatModel`. Billed a handful of tokens at most (max_tokens 5).
    */
   chat?: ChatProbeResult
+  /**
+   * Minimal-cost tool-call check, present only when the caller named a
+   * `toolCallModel`. Verifies the gateway's function-calling path.
+   */
+  toolCall?: ToolCallProbeResult
   /** Human-readable failure reason when `ok` is false. */
   error?: string
 }
@@ -283,6 +288,27 @@ export interface ChatProbeResult {
 }
 
 /**
+ * One minimal tool-call probe (`POST /chat/completions` with a `ping` tool
+ * declared and a prompt asking the model to call it). Verifies the gateway
+ * end-to-end exercises the function-calling path — discovery and text chat
+ * can be healthy while tool calls still fail (missing `tools` passthrough,
+ * a gateway that strips tool schemas, an upstream that refuses). Also a
+ * near-zero-cost check: `max_tokens` caps the reply.
+ */
+export interface ToolCallProbeResult {
+  /** True when the gateway returned a `tool_calls[].function.name === 'ping'`. */
+  ok: boolean
+  /** HTTP status, when a response arrived. */
+  status?: number
+  /** Round-trip latency in milliseconds for the tool-call completion. */
+  latencyMs: number
+  /** The tool name the model actually called (expected `ping`). */
+  toolName?: string
+  /** Human-readable failure reason when `ok` is false. */
+  error?: string
+}
+
+/**
  * Request payload of the `probe` RPC endpoint. Mirrors the discovery draft:
  * a base and a one-shot credential override the current connection snapshot,
  * so a user can probe a pasted endpoint before committing the key.
@@ -302,6 +328,14 @@ export interface ProbeRequest {
   chatModel?: string
   /** Time bound for the chat probe, milliseconds (default 20_000). */
   chatTimeoutMs?: number
+  /**
+   * When set, also run a minimal tool-call completion probe against this
+   * model id (a `ping` function with the model asked to call it). Absent,
+   * no tool-call check runs.
+   */
+  toolCallModel?: string
+  /** Time bound for the tool-call probe, milliseconds (default 30_000). */
+  toolCallTimeoutMs?: number
   /**
    * Forward proxy to route both probe requests through; overrides the
    * instance snapshot's proxy so an instance with its own proxy probes

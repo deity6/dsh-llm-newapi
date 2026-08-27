@@ -21,6 +21,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { execFileSync } from 'node:child_process'
 import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MODEL_EXCLUDE_PATTERNS,
@@ -114,6 +115,14 @@ export interface NewApiInstanceConfig {
   id: string
   /** Display name shown in the provider picker; defaults to `id`. */
   displayName?: string
+  /**
+   * Credential reference the gateway key is stored under. Defaults to
+   * `newapi_<id>`; persisting it here (the settings UI writes it on save)
+   * lets the official Models page discover the key and show the
+   * configured/missing dot, because that page only joins credentials whose
+   * `apiKeyEnv` the stored profile names.
+   */
+  apiKeyEnv?: string
   /** Gateway base including the `/v1` prefix. */
   baseURL?: string
   /** Advisory models shown by discovery consumers; defaults to none. */
@@ -178,12 +187,23 @@ export interface Config {
   retryPolicy?: RetryPolicyConfig
 }
 
-/** Forward-proxy settings for the models.dev catalog download. */
+/** How an instance's gateway traffic reaches the network. */
+export type ProxyMode = 'system' | 'direct' | 'custom'
+
+/**
+ * Forward-proxy settings for one instance's gateway traffic.
+ * - `system`: follow the machine proxy (HTTP(S)_PROXY env, then the Windows
+ *   WinINET system proxy — what Clash's "系统代理" writes).
+ * - `direct`: no proxy.
+ * - `custom`: route through `url`.
+ * The legacy `{ enabled, url }` shape is accepted and migrates to a mode.
+ */
 export interface ProxyConfig {
-  /** Whether the proxy is used; defaults to false. */
-  enabled?: boolean
-  /** Proxy URL; presets default to `http://127.0.0.1:7890`. */
+  mode?: ProxyMode
+  /** Proxy URL; required (and validated) when `mode === 'custom'`. */
   url?: string
+  /** Legacy: whether the proxy is used; migrated to `mode`. */
+  enabled?: boolean
 }
 
 const catalogModel: z<NewApiCatalogModel> = z.object({
@@ -200,21 +220,76 @@ const catalogModel: z<NewApiCatalogModel> = z.object({
 export const DEFAULT_PROXY_URL = 'http://127.0.0.1:7890'
 
 const proxySchema: z<ProxyConfig> = z.object({
-  enabled: z.boolean().default(false),
+  // No `.default` on mode: a pre-0.9.4 `{ enabled, url }` block must reach
+  // `proxyModeOf` with `mode` absent so the legacy `enabled` flag migrates.
+  // The whole-block default below covers a completely absent proxy.
+  mode: z.string(),
   url: z.string().default(DEFAULT_PROXY_URL),
-})
+  // Legacy: pre-0.9.4 sections used `enabled`; keep accepting it.
+  enabled: z.boolean(),
+}).default({ mode: 'system', url: DEFAULT_PROXY_URL })
+
+/** Migrate a legacy `{ enabled, url }` proxy block onto the mode shape. */
+function proxyModeOf(raw: ProxyConfig | undefined): { mode: ProxyMode; url: string } {
+  if (raw === undefined) return { mode: 'system', url: DEFAULT_PROXY_URL }
+  if (raw.mode !== undefined) return { mode: raw.mode, url: raw.url ?? DEFAULT_PROXY_URL }
+  // Legacy: enabled === true was the only way to use a proxy.
+  return { mode: raw.enabled === true ? 'custom' : 'direct', url: raw.url ?? DEFAULT_PROXY_URL }
+}
+
+/**
+ * Resolve the machine proxy: HTTP(S)_PROXY env first, then the Windows
+ * WinINET system proxy (the registry row Clash's "系统代理" writes), so
+ * `mode: 'system'` follows whatever the OS is using. Cached 30s because the
+ * registry read spawns a process; resolution failure degrades to no proxy.
+ */
+let systemProxyCache: { at: number; url: string | undefined } | undefined
+const SYSTEM_PROXY_TTL_MS = 30_000
+function systemProxyUrl(): string | undefined {
+  const now = Date.now()
+  if (systemProxyCache !== undefined && now - systemProxyCache.at < SYSTEM_PROXY_TTL_MS) {
+    return systemProxyCache.url
+  }
+  const envUrl = process.env.HTTPS_PROXY ?? process.env.https_proxy
+    ?? process.env.HTTP_PROXY ?? process.env.http_proxy
+  let url = envUrl !== undefined && envUrl.trim().length > 0 ? envUrl.trim() : undefined
+  if (url === undefined && process.platform === 'win32') {
+    try {
+      const enable = execFileSync('reg', [
+        'query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings',
+        '/v', 'ProxyEnable',
+      ], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
+      const on = /0x([0-9a-f]+)/i.exec(enable)?.[1]
+      if (on !== undefined && parseInt(on, 16) === 1) {
+        const server = execFileSync('reg', [
+          'query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings',
+          '/v', 'ProxyServer',
+        ], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
+        const raw = /ProxyServer\s+REG_SZ\s+(\S+)/i.exec(server)?.[1]
+        if (raw !== undefined && raw.length > 0) {
+          url = /^[a-z]+:\/\//i.test(raw) ? raw : `http://${raw}`
+        }
+      }
+    } catch {
+      // No registry access (or reg missing): fall through to no proxy.
+    }
+  }
+  systemProxyCache = { at: now, url }
+  return url
+}
 
 /** One gateway instance entry; mirrors the legacy flat Config fields. */
 const instanceSchema: z<NewApiInstanceConfig> = z.object({
   id: z.string().required(),
   displayName: z.string(),
+  apiKeyEnv: z.string(),
   baseURL: z.string(),
   models: z.array(catalogModel).default([]),
   modelExcludePatterns: z.array(z.string()).default([...DEFAULT_MODEL_EXCLUDE_PATTERNS]),
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
   maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
-  proxy: proxySchema.default({ enabled: false, url: DEFAULT_PROXY_URL }),
+  proxy: proxySchema,
   providerHints: z.object({
     defaults: z.object({}),
     models: z.object({}),
@@ -337,17 +412,20 @@ export function resolveAdapterOptions(
     )
   }
   const defaultContextWindow = config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW
-  const proxyEnabled = config.proxy?.enabled === true
-  const proxyUrlRaw = config.proxy?.url ?? DEFAULT_PROXY_URL
-  if (proxyEnabled) {
-    // Only judged while enabled: a stored disabled proxy with a stale URL
-    // must not fail the whole section.
-    try { new URL(proxyUrlRaw) } catch {
-      throw new Error(`${PKG}: proxy.url must be an absolute URL (got: ${proxyUrlRaw})`)
+  const proxy = proxyModeOf(config.proxy)
+  let proxyUrl: string | undefined
+  if (proxy.mode === 'custom') {
+    // Only judged while the custom mode is active: a stored custom URL that
+    // is invalid must not fail the whole section when the mode is off.
+    try { new URL(proxy.url) } catch {
+      throw new Error(`${PKG}: proxy.url must be an absolute URL (got: ${proxy.url})`)
     }
-    if (!/^https?:$/.test(new URL(proxyUrlRaw).protocol)) {
-      throw new Error(`${PKG}: proxy.url must be an http(s) URL (got: ${proxyUrlRaw})`)
+    if (!/^https?:$/.test(new URL(proxy.url).protocol)) {
+      throw new Error(`${PKG}: proxy.url must be an http(s) URL (got: ${proxy.url})`)
     }
+    proxyUrl = proxy.url
+  } else if (proxy.mode === 'system') {
+    proxyUrl = systemProxyUrl()
   }
   return {
     baseURL: normalizeBaseUrl(rawBase),
@@ -356,7 +434,7 @@ export function resolveAdapterOptions(
     modelExcludePatterns,
     defaultContextWindow,
     streamIdleTimeoutMs,
-    ...proxyEnabled ? { proxyUrl: proxyUrlRaw } : {},
+    ...proxyUrl === undefined ? {} : { proxyUrl },
     providerHints: {
       defaults: { ...config.providerHints?.defaults },
       models: { ...config.providerHints?.models },
@@ -405,7 +483,7 @@ export function apply(ctx: Context, config: Config): void {
     states.set(id, state)
     if (raw === state.lastRaw && state.lastGood !== undefined) return state.lastGood
     try {
-      const next = resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refOf(id))
+      const next = resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), entry.instance.apiKeyEnv?.trim() || refOf(id))
       state.lastRaw = raw
       state.lastGood = next
       return next
@@ -418,7 +496,7 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
   // Validate the initial composition (fail loud on a bad static config).
-  for (const entry of entryList()) resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refOf(entry.id))
+  for (const entry of entryList()) resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), entry.instance.apiKeyEnv?.trim() || refOf(entry.id))
 
   const resolveApiKey = async (connection: ResolvedNewApiOptions): Promise<string> => {
     // Every credential fact comes from the caller's snapshot, so a rejected
@@ -641,7 +719,7 @@ export function apply(ctx: Context, config: Config): void {
     // silently keeps the last good facts at every request.
     validate: (value) => {
       for (const entry of instanceEntriesOf(value)) {
-        resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refOf(entry.id))
+        resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), entry.instance.apiKeyEnv?.trim() || refOf(entry.id))
       }
     },
     setSource: (source) => {

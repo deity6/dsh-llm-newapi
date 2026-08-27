@@ -51,6 +51,20 @@ export interface ChatProbeResult {
   error?: string
 }
 
+/** Minimal tool-call probe outcome (mirrors host `types.ts`). */
+export interface ToolCallProbeResult {
+  /** True when the gateway returned a `tool_calls[].function.name === 'ping'`. */
+  ok: boolean
+  /** HTTP status, when a response arrived. */
+  status?: number
+  /** Round-trip latency in milliseconds. */
+  latencyMs: number
+  /** The tool name the model actually called (expected `ping`). */
+  toolName?: string
+  /** Human-readable failure reason when `ok` is false. */
+  error?: string
+}
+
 /** Result of the `probe` RPC endpoint (mirrors host `types.ts`). */
 export interface ProbeResult {
   /** True when the probe completed with a usable outcome. */
@@ -69,6 +83,8 @@ export interface ProbeResult {
   latencyMs: number
   /** Present when the caller requested a chat probe (`chatModel`). */
   chat?: ChatProbeResult
+  /** Present when the caller requested a tool-call probe (`toolCallModel`). */
+  toolCall?: ToolCallProbeResult
   /** Human-readable failure reason when `ok` is false. */
   error?: string
 }
@@ -83,6 +99,10 @@ export interface ProbeRequest {
   chatModel?: string
   /** Time bound for the chat probe, milliseconds (host default 20_000). */
   chatTimeoutMs?: number
+  /** When set, also run a minimal tool-call probe against this model id. */
+  toolCallModel?: string
+  /** Time bound for the tool-call probe, milliseconds (host default 30_000). */
+  toolCallTimeoutMs?: number
   /** Forward proxy for the probe requests; overrides the snapshot's proxy. */
   proxyUrl?: string
 }

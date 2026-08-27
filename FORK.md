@@ -125,3 +125,18 @@ registerChannelConnParser('mygw_token', (obj) => {
   - 新增 CSS：`.newapi-tabs` 横滚 + `.newapi-tab` 胶囊 +
     `.newapi-tabActive` 品牌色高亮 + `.newapi-tabAdd` 虚线 +
   - 仍是纯 client 改动，刷浏览器即生效，宿主无需重启
+- `0.9.4`：**代理改模式选择 + 工具调用测试 + Models 页绿点修复**。
+  - **代理模式**：`proxy` 从 `{enabled, url}` 改为 `{mode: system|direct|custom, url?}`。
+    旧格式自动迁移（`enabled:true→custom`、`enabled:false→direct`）；`mode` 不加
+    schema 默认值（否则 schema 规范化会先于迁移吃掉 legacy enabled）。
+    `system` = 跟随机器代理（HTTP(S)_PROXY env → Windows WinINET 注册表，30s 缓存，
+    Clash 系统代理即写这里）。UI 从复选框改成下拉（跟随系统/直连/自定义）。
+  - **工具调用测试**：探针新增 `toolCallModel`（`ping` 函数 + 模型被要求调用它，
+    `max_tokens:32`，默认 30s 超时），验证网关 tools 通路（/models 和文本 chat
+    正常但 tools 被剥的网关只有它能测出来）。UI 加"含工具调用测试"勾选 + 结果展示。
+  - **Models 页绿点修复**：实例配置新增 `apiKeyEnv`（序列化自动写 `newapi_<id>`，
+    host 解析用 `apiKeyEnv ?? refOf(id)`）。根因：Models 页只对"存储 profile 里
+    有 apiKeyEnv 字段"的行做 credentials.describe，旧配置没有该字段 → seekai/
+    justwoker 永远无点（连红点都没有）。写入后官方"模型"页正确显示已配置绿点。
+  - settings.yaml：seekai/justwoker 补 `apiKeyEnv` + proxy 迁到 `mode`。
+  - 回归：migrate-smoke 全 PASS（13 项）。

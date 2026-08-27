@@ -41,6 +41,7 @@ import { parseSse } from './sse.ts'
 import { translate } from './translate.ts'
 import type {
   ChatProbeResult,
+  ToolCallProbeResult,
   ModelsDevApi,
   ModelsDevMatch,
   ModelsDevModel,
@@ -164,6 +165,8 @@ export interface NewApiAdapterOptions {
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 /** Default time bound for the optional minimal chat probe. */
 const CHAT_PROBE_DEFAULT_TIMEOUT_MS = 20_000
+/** Default time bound for the optional minimal tool-call probe. */
+const TOOL_PROBE_DEFAULT_TIMEOUT_MS = 30_000
 /** Default context capacity when neither the catalog nor config names one. */
 export const DEFAULT_CONTEXT_WINDOW = 128_000
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
@@ -718,6 +721,12 @@ export class NewApiAdapter extends LlmAdapter {
     if (result.authValid === true && request.chatModel !== undefined) {
       result.chat = await this.probeChat(base, apiKey, proxyUrl, request)
     }
+    // Optional minimal-cost tool-call probe: verifies the gateway's
+    // function-calling path end to end (some gateways answer /models and text
+    // chat yet strip `tools`). Runs under the same auth gate.
+    if (result.authValid === true && request.toolCallModel !== undefined) {
+      result.toolCall = await this.probeToolCall(base, apiKey, proxyUrl, request)
+    }
     return result
   }
 
@@ -804,6 +813,109 @@ export class NewApiAdapter extends LlmAdapter {
         ? error.cause.message
         : error instanceof Error ? error.message : String(error)
       return { ok: false, latencyMs, error: `chat probe failed: ${cause}` }
+    } finally {
+      clearTimeout(timer)
+      request.signal?.removeEventListener('abort', onAbort)
+    }
+  }
+
+  /**
+   * One minimal tool-call probe: `POST /chat/completions` declaring a `ping`
+   * function and asking the model to call it, bounded by `toolCallTimeoutMs`
+   * (default 30s). Never throws; every failure is returned as a structured
+   * {@link ToolCallProbeResult}. Success means the gateway's function-calling
+   * path answered with a real `tool_calls` entry — the failure mode that a
+   * plain text chat probe cannot see.
+   * @param base - normalized gateway base (chat path appended here).
+   * @param apiKey - the resolved probe credential.
+   * @param proxyUrl - the effective forward proxy (request override or snapshot).
+   * @param request - the probe draft (tool model, timeout, cancellation).
+   * @returns the tool-call outcome — never throws.
+   */
+  private async probeToolCall(
+    base: string,
+    apiKey: string,
+    proxyUrl: string | undefined,
+    request: ProbeRequest,
+  ): Promise<ToolCallProbeResult> {
+    const started = Date.now()
+    const timeoutMs = request.toolCallTimeoutMs ?? TOOL_PROBE_DEFAULT_TIMEOUT_MS
+    const controller = new AbortController()
+    const onAbort = () => controller.abort()
+    request.signal?.addEventListener('abort', onAbort, { once: true })
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await gatewayFetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          'content-type': 'application/json',
+          accept: 'application/json',
+          ...attributionHeaders(),
+        },
+        body: JSON.stringify({
+          model: request.toolCallModel,
+          messages: [{
+            role: 'user',
+            content: 'Call the ping function. Reply with nothing else.',
+          }],
+          tools: [{
+            type: 'function',
+            function: {
+              name: 'ping',
+              description: 'A no-op health check that returns pong.',
+              parameters: { type: 'object', properties: {}, additionalProperties: false },
+            },
+          }],
+          tool_choice: 'auto',
+          max_tokens: 32,
+          stream: false,
+        }),
+        signal: controller.signal,
+      }, proxyUrl)
+      const latencyMs = Date.now() - started
+      let body: {
+        choices?: Array<{ message?: { tool_calls?: Array<{ function?: { name?: string } }> } }>
+        error?: { message?: string }
+      } = {}
+      try {
+        body = await response.json() as typeof body
+      } catch {
+        // Non-JSON error page: status still identifies the failure.
+      }
+      if (!response.ok) {
+        return {
+          ok: false,
+          status: response.status,
+          latencyMs,
+          error: body.error?.message ?? `HTTP ${response.status}`,
+        }
+      }
+      const toolName = body.choices?.[0]?.message?.tool_calls?.[0]?.function?.name
+      return toolName !== undefined && toolName.length > 0
+        ? { ok: true, status: response.status, latencyMs, toolName }
+        : {
+          ok: false,
+          status: response.status,
+          latencyMs,
+          error: 'gateway returned no tool_calls (tools passthrough may be stripped)',
+        }
+    } catch (error: unknown) {
+      const latencyMs = Date.now() - started
+      if (request.signal?.aborted) {
+        return { ok: false, latencyMs, error: 'tool-call probe aborted' }
+      }
+      if (controller.signal.aborted) {
+        return {
+          ok: false,
+          latencyMs,
+          error: `tool-call probe timed out after ${Math.round(timeoutMs / 1000)}s`,
+        }
+      }
+      const cause = error instanceof Error && error.cause instanceof Error
+        ? error.cause.message
+        : error instanceof Error ? error.message : String(error)
+      return { ok: false, latencyMs, error: `tool-call probe failed: ${cause}` }
     } finally {
       clearTimeout(timer)
       request.signal?.removeEventListener('abort', onAbort)

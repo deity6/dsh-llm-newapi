@@ -23,6 +23,9 @@ import type {
 /** One catalog entry, structurally open like the official editors. */
 export type ModelDraft = Record<string, unknown>
 
+/** How one instance's gateway traffic reaches the network (mirrors host). */
+export type InstanceProxyMode = 'system' | 'direct' | 'custom'
+
 /** The persistent per-instance facts the parent persists and the card edits. */
 export interface InstanceDraft {
   /** Sanitized route suffix (`newapi-<id>` / `newapi_<id>`). */
@@ -32,7 +35,7 @@ export interface InstanceDraft {
   /** Gateway base including the `/v1` prefix. */
   baseURL: string
   models: ModelDraft[]
-  proxyEnabled: boolean
+  proxyMode: InstanceProxyMode
   proxyUrl: string
 }
 
@@ -191,6 +194,7 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
   const [probeBusy, setProbeBusy] = useState(false)
   const [probeResult, setProbeResult] = useState<ProbeResult | undefined>(undefined)
   const [probeWithChat, setProbeWithChat] = useState(false)
+  const [probeWithTool, setProbeWithTool] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [importText, setImportText] = useState('')
   const [importBusy, setImportBusy] = useState(false)
@@ -321,7 +325,7 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
     try {
       const response = await fetchModelParams({
         modelIds: ids,
-        ...draft.proxyEnabled ? { proxyUrl: draft.proxyUrl.trim() } : {},
+        ...draft.proxyMode === 'custom' && draft.proxyUrl.trim().length > 0 ? { proxyUrl: draft.proxyUrl.trim() } : {},
       })
       if (!response.ok) {
         setError(response.error.message)
@@ -389,8 +393,11 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
       const response = await probe({
         ...base.length > 0 ? { baseURL: base } : {},
         ...key.length > 0 ? { apiKey: key } : {},
-        ...draft.proxyEnabled ? { proxyUrl: draft.proxyUrl.trim() } : {},
+        // The explicit URL only applies to the custom mode; `system`/`direct`
+        // resolve host-side from the instance snapshot.
+        ...draft.proxyMode === 'custom' && draft.proxyUrl.trim().length > 0 ? { proxyUrl: draft.proxyUrl.trim() } : {},
         ...probeWithChat && chatModel !== undefined ? { chatModel, chatTimeoutMs: 25_000 } : {},
+        ...probeWithTool && chatModel !== undefined ? { toolCallModel: chatModel, toolCallTimeoutMs: 30_000 } : {},
       })
       if (!response.ok) {
         setNotice(`${t('probeFailed')}: ${response.error.message}`)
@@ -506,6 +513,14 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
             />
             {t('probeWithChat')}
           </label>
+          <label className="newapi-probecheck">
+            <input
+              type="checkbox" checked={probeWithTool}
+              aria-label={t('probeWithTool')}
+              onChange={(event) => { setProbeWithTool(event.target.checked) }}
+            />
+            {t('probeWithTool')}
+          </label>
           <button
             type="button" className="newapi-linkbutton"
             onClick={() => { setImportOpen(current => !current); setImportError(undefined) }}
@@ -567,6 +582,13 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
                       : `${t('chatProbeFail')}: ${probeResult.chat.error ?? ''} · ${String(probeResult.chat.latencyMs)}ms`}
                   </p>
                 )}
+                {probeResult.toolCall === undefined ? null : (
+                  <p className={probeResult.toolCall.ok ? 'newapi-probe-ok' : 'newapi-error'}>
+                    {probeResult.toolCall.ok
+                      ? `${t('toolProbeOk')}: ${probeResult.toolCall.toolName ?? ''} · ${String(probeResult.toolCall.latencyMs)}ms`
+                      : `${t('toolProbeFail')}: ${probeResult.toolCall.error ?? ''} · ${String(probeResult.toolCall.latencyMs)}ms`}
+                  </p>
+                )}
                 {probeResult.error === undefined ? null : <p className="newapi-error">{probeResult.error}</p>}
                 {probeResult.sampleModels !== undefined && probeResult.sampleModels.length > 0 ? (
                   <p className="newapi-hint" style={{ marginTop: 4 }}>{probeResult.sampleModels.slice(0, 5).join(', ')}</p>
@@ -599,15 +621,23 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
           </div>
         </div>
         <div className="newapi-proxyrow">
-          <label>
-            <input
-              type="checkbox" checked={draft.proxyEnabled}
-              aria-label={t('proxyToggle')}
-              onChange={(event) => { patch({ proxyEnabled: event.target.checked }) }}
-            />
-            {t('proxyToggle')}
+          <label className="newapi-proxylabel">
+            {t('proxyMode')}
+            <select
+              className="newapi-input newapi-select"
+              aria-label={t('proxyMode')}
+              value={draft.proxyMode}
+              onChange={(event) => {
+                const mode = event.target.value as InstanceProxyMode
+                patch({ proxyMode: mode })
+              }}
+            >
+              <option value="system">{t('proxyModeSystem')}</option>
+              <option value="direct">{t('proxyModeDirect')}</option>
+              <option value="custom">{t('proxyModeCustom')}</option>
+            </select>
           </label>
-          {draft.proxyEnabled ? (
+          {draft.proxyMode === 'custom' ? (
             <input
               className="newapi-input" type="text" style={{ maxWidth: 220 }}
               aria-label={t('proxyUrl')} placeholder={DEFAULT_PROXY_URL}
