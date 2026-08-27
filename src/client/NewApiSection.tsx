@@ -174,7 +174,11 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   const [revision, setRevision] = useState<number>(0)
   const [writable, setWritable] = useState(true)
   const [instances, setInstances] = useState<InstanceDraft[]>([])
-  const [activeId, setActiveId] = useState<string | undefined>(undefined)
+  // Active tab tracked by POSITION, not by instance id: the id field is
+  // editable, so matching by id makes the active tab "orphan" the moment the
+  // user types (findIndex misses -> falls back to index 0 -> the card jumps
+  // to the first instance). Position is stable under id edits.
+  const [activeIndex, setActiveIndex] = useState(-1)
   const [credentials, setCredentials] = useState<ReadonlyMap<string, CredentialView>>(new Map())
   /** Pending per-instance keys to store on Save: ref → value. */
   const [pendingKeys, setPendingKeys] = useState<ReadonlyMap<string, string>>(new Map())
@@ -248,12 +252,12 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   }
 
   const removeInstance = (index: number): void => {
-    const removedId = instances[index]?.id
     setInstances(current => current.filter((_, at) => at !== index))
-    if (removedId !== undefined && removedId === activeId) {
-      // Render falls back to the first remaining via activeIndex below.
-      setActiveId(undefined)
-    }
+    setActiveIndex(current => {
+      if (index < current) return current - 1 // a tab above closed: shift up
+      if (index === current) return current   // the active tab closed: the next
+      return current                          // slides into this position
+    })
   }
 
   // Append a new instance with a fresh unique id and switch to it, so the
@@ -265,7 +269,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     while (used.has(`newapi-${String(n)}`)) n++
     const newId = `newapi-${String(n)}`
     setInstances(current => [...current, { ...blankDraft(), id: newId, displayName: '' }])
-    setActiveId(newId)
+    setActiveIndex(instances.length) // pre-append length = the new tab's index
   }
 
   const handlePendingKey = (index: number, value: string): void => {
@@ -326,14 +330,12 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     }
   }
 
-  // Tab bar: one pill per instance, plus a + to add. Active pill highlighted.
-  // Order = array order; reordering is not exposed (see addInstance comment).
-  // Falls back to the first instance if activeId no longer matches (e.g. after
-  // the active instance was removed), or -1 when there are no instances.
-  const activeIndex = instances.length === 0
+  // Clamp the desired index to the current list (the list may have shrunk
+  // after a removal above the active tab). -1 when there are no instances.
+  const safeActiveIndex = instances.length === 0
     ? -1
-    : Math.max(0, instances.findIndex(d => d.id === activeId))
-  const activeDraft = activeIndex >= 0 ? instances[activeIndex] : undefined
+    : Math.min(Math.max(activeIndex, 0), instances.length - 1)
+  const activeDraft = safeActiveIndex >= 0 ? instances[safeActiveIndex] : undefined
 
   return (
     <section aria-label={t('nav')}>
@@ -344,18 +346,18 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
 
       <div className="newapi-tabs" role="tablist" aria-label={t('instanceTabs')}>
         {instances.map((draft, index) => {
-          const isActive = index === activeIndex
+          const isActive = index === safeActiveIndex
           const label = draft.displayName.trim().length > 0
             ? draft.displayName
             : (draft.id.trim().length > 0 ? draft.id : `${t('instanceTitle')} ${String(index + 1)}`)
           return (
             <button
-              key={draft.id === '' ? `blank-${String(index)}` : draft.id}
+              key={`tab-${String(index)}`}
               type="button"
               role="tab"
               aria-selected={isActive}
               className={`newapi-tab ${isActive ? 'newapi-tabActive' : ''}`}
-              onClick={() => { setActiveId(draft.id) }}
+              onClick={() => { setActiveIndex(index) }}
             >
               <span className="newapi-tabLabel">{label}</span>
             </button>
@@ -375,8 +377,11 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
         <p className="newapi-empty">{t('noInstances')}</p>
       ) : activeDraft === undefined ? null : (
         <InstanceEditor
-          key={activeDraft.id === '' ? `blank-${String(activeIndex)}` : activeDraft.id}
-          index={activeIndex}
+          // Keyed by POSITION, not by draft id: the id field is editable, and
+          // a key that changes mid-typing would remount the whole card (losing
+          // focus, the key draft, and expanded rows).
+          key={`instance-${String(safeActiveIndex)}`}
+          index={safeActiveIndex}
           draft={activeDraft}
           keyConfigured={credentials.get(clientRefOf(activeDraft.id))?.configured}
           keyLocked={credentials.get(clientRefOf(activeDraft.id))?.locked ?? false}
@@ -385,9 +390,9 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
           fetchModelParams={fetchModelParams}
           probe={probe}
           parseChannelConn={parseChannelConn}
-          onPatch={(patch) => { patchInstance(activeIndex, patch) }}
-          onPendingKey={(value) => { handlePendingKey(activeIndex, value) }}
-          onRemove={() => { removeInstance(activeIndex) }}
+          onPatch={(patch) => { patchInstance(safeActiveIndex, patch) }}
+          onPendingKey={(value) => { handlePendingKey(safeActiveIndex, value) }}
+          onRemove={() => { removeInstance(safeActiveIndex) }}
         />
       )}
 

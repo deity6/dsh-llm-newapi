@@ -140,3 +140,10 @@ registerChannelConnParser('mygw_token', (obj) => {
     justwoker 永远无点（连红点都没有）。写入后官方"模型"页正确显示已配置绿点。
   - settings.yaml：seekai/justwoker 补 `apiKeyEnv` + proxy 迁到 `mode`。
   - 回归：migrate-smoke 全 PASS（13 项）。
+- `0.9.5`：**修复 tab+card 的激活跟踪缺陷**。之前用 `activeId`（存实例 id 字符串）
+  去 `instances.findIndex(d => d.id === activeId)` 反查位置——但 id 字段本身可编辑，
+  用户一改 id，activeId 立刻失配 → findIndex -1 → 兜底跳到第一个实例；同时编辑器
+  `key={draft.id}` 变化导致整卡重挂载（丢焦点/丢展开态/丢密钥草稿）。
+  修复：激活态改按**位置索引** `activeIndex` 跟踪（id 可编辑、位置不变），渲染时
+  clamp 到当前列表；tab 与编辑器 key 都改用位置（`tab-<i>` / `instance-<i>`），
+  编辑 id 不再触发重挂载；删除/新增时索引显式维护。
