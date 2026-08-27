@@ -147,7 +147,6 @@ function bufferKey(index: number, field: CapacityField): string {
 /** Inject face: everything one instance card needs from the parent + the wire. */
 export interface InstanceEditorProps {
   index: number
-  total: number
   draft: InstanceDraft
   /** Credential state for this instance's ref (`newapi_<id>`). */
   keyConfigured?: boolean
@@ -168,7 +167,6 @@ export interface InstanceEditorProps {
   /** Lift the pending key draft up (empty string = nothing to store). */
   onPendingKey: (value: string) => void
   onRemove: () => void
-  onMove: (direction: -1 | 1) => void
 }
 
 /**
@@ -178,7 +176,7 @@ export interface InstanceEditorProps {
  * @returns the card.
  */
 export function InstanceEditor(props: InstanceEditorProps): ReactNode {
-  const { index, total, draft, keyConfigured, keyLocked, api, t, fetchModelParams, probe, parseChannelConn, onPatch, onPendingKey, onRemove, onMove } = props
+  const { index, draft, keyConfigured, keyLocked, api, t, fetchModelParams, probe, parseChannelConn, onPatch, onPendingKey, onRemove } = props
   const [keyDraft, setKeyDraft] = useState('')
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set())
   const [editing, setEditing] = useState<ReadonlyMap<string, string>>(new Map())
@@ -438,12 +436,6 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
       <legend className="newapi-instance-head">
         <span className="newapi-instance-title">{`${t('instanceTitle')} ${String(index + 1)}`}</span>
         <span className="newapi-instance-actions">
-          <button type="button" className="newapi-linkbutton" disabled={index === 0} onClick={() => { onMove(-1) }}>
-            {t('moveUp')}
-          </button>
-          <button type="button" className="newapi-linkbutton" disabled={index === total - 1} onClick={() => { onMove(1) }}>
-            {t('moveDown')}
-          </button>
           <button type="button" className="newapi-linkbutton newapi-iconbutton--danger" onClick={onRemove}>
             {t('removeInstance')}
           </button>

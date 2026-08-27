@@ -111,3 +111,17 @@ registerChannelConnParser('mygw_token', (obj) => {
   与 dsh-reasoning-slider / dsh-model-picker 兼容：模型目录的
   `reasoning.efforts`（id/name）由 `resolveModel` 从 catalog 的
   reasoningEfforts 提供；提供商标签即上面修好的 displayName。
+- `0.9.3`：**设置页实例区改成"切换栏 + 卡片"**。原来所有实例卡片垂直堆
+  叠 + 每张卡一个"上移/下移"，加新实例要滚到底。改成上方一条 tab
+  栏（每个实例一个胶囊，激活高亮，+ 添加始终在右），下方只渲染激
+  活的那一张卡。删除/添加/探测/描述符导入都还在卡里。
+  - 删除上移/下移（tab 顺序 = 数组顺序；要重排就删了重加，注释里说
+    明——拖拽排序留给下版）
+  - 删 active 实例时自动落到第一张剩余（render 里 `activeIndex` 自
+    带回退，不再有"激活变孤儿"）
+  - 移除 `NewApiAdapterOptions.onMove`、`InstanceEditor.onMove`/`total`
+    字段、`locale.moveUp/moveDown`；新增 `locale.instanceTabs` /
+    `tabReorderHint`（中英一致）
+  - 新增 CSS：`.newapi-tabs` 横滚 + `.newapi-tab` 胶囊 +
+    `.newapi-tabActive` 品牌色高亮 + `.newapi-tabAdd` 虚线 +
+  - 仍是纯 client 改动，刷浏览器即生效，宿主无需重启

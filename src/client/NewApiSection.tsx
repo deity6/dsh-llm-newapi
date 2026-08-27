@@ -155,6 +155,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   const [revision, setRevision] = useState<number>(0)
   const [writable, setWritable] = useState(true)
   const [instances, setInstances] = useState<InstanceDraft[]>([])
+  const [activeId, setActiveId] = useState<string | undefined>(undefined)
   const [credentials, setCredentials] = useState<ReadonlyMap<string, CredentialView>>(new Map())
   /** Pending per-instance keys to store on Save: ref → value. */
   const [pendingKeys, setPendingKeys] = useState<ReadonlyMap<string, string>>(new Map())
@@ -228,19 +229,24 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   }
 
   const removeInstance = (index: number): void => {
+    const removedId = instances[index]?.id
     setInstances(current => current.filter((_, at) => at !== index))
+    if (removedId !== undefined && removedId === activeId) {
+      // Render falls back to the first remaining via activeIndex below.
+      setActiveId(undefined)
+    }
   }
 
-  const moveInstance = (index: number, direction: -1 | 1): void => {
-    setInstances(current => {
-      const next = [...current]
-      const target = index + direction
-      if (target < 0 || target >= next.length) return current
-      const [moved] = next.splice(index, 1)
-      if (moved === undefined) return current
-      next.splice(target, 0, moved)
-      return next
-    })
+  // Append a new instance with a fresh unique id and switch to it, so the
+  // user lands directly on the new card. Reordering is not exposed in the UI:
+  // the tab order matches the array order; to reorder, remove + re-add.
+  const addInstance = (): void => {
+    const used = new Set(instances.map(d => d.id))
+    let n = instances.length + 1
+    while (used.has(`newapi-${String(n)}`)) n++
+    const newId = `newapi-${String(n)}`
+    setInstances(current => [...current, { ...blankDraft(), id: newId, displayName: '' }])
+    setActiveId(newId)
   }
 
   const handlePendingKey = (index: number, value: string): void => {
@@ -301,6 +307,15 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     }
   }
 
+  // Tab bar: one pill per instance, plus a + to add. Active pill highlighted.
+  // Order = array order; reordering is not exposed (see addInstance comment).
+  // Falls back to the first instance if activeId no longer matches (e.g. after
+  // the active instance was removed), or -1 when there are no instances.
+  const activeIndex = instances.length === 0
+    ? -1
+    : Math.max(0, instances.findIndex(d => d.id === activeId))
+  const activeDraft = activeIndex >= 0 ? instances[activeIndex] : undefined
+
   return (
     <section aria-label={t('nav')}>
       <p>{t('intro')}</p>
@@ -308,40 +323,54 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       {!writable ? <p>{t('readOnly')}</p> : null}
       {errorText === undefined ? null : <p className="newapi-error">{errorText}</p>}
 
-      {instances.length === 0 ? <p className="newapi-empty">{t('noInstances')}</p> : null}
-      {instances.map((draft, index) => {
-        const ref = clientRefOf(draft.id)
-        const view = credentials.get(ref)
-        return (
-          <InstanceEditor
-            key={draft.id === '' ? index : `${draft.id}-${String(index)}`}
-            index={index}
-            total={instances.length}
-            draft={draft}
-            keyConfigured={view?.configured}
-            keyLocked={view?.locked ?? false}
-            api={api}
-            t={t}
-            fetchModelParams={fetchModelParams}
-            probe={probe}
-            parseChannelConn={parseChannelConn}
-            onPatch={(patch) => { patchInstance(index, patch) }}
-            onPendingKey={(value) => { handlePendingKey(index, value) }}
-            onRemove={() => { removeInstance(index) }}
-            onMove={(direction) => { moveInstance(index, direction) }}
-          />
-        )
-      })}
-
-      <div className="newapi-instance-actions" style={{ marginTop: 8 }}>
+      <div className="newapi-tabs" role="tablist" aria-label={t('instanceTabs')}>
+        {instances.map((draft, index) => {
+          const isActive = index === activeIndex
+          const label = draft.displayName.trim().length > 0
+            ? draft.displayName
+            : (draft.id.trim().length > 0 ? draft.id : `${t('instanceTitle')} ${String(index + 1)}`)
+          return (
+            <button
+              key={draft.id === '' ? `blank-${String(index)}` : draft.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              className={`newapi-tab ${isActive ? 'newapi-tabActive' : ''}`}
+              onClick={() => { setActiveId(draft.id) }}
+            >
+              <span className="newapi-tabLabel">{label}</span>
+            </button>
+          )
+        })}
         <button
-          type="button" className="newapi-addmodel"
-          disabled={busy}
-          onClick={() => { setInstances(current => [...current, blankDraft()]) }}
+          type="button"
+          className="newapi-tab newapi-tabAdd"
+          title={t('addInstance')}
+          onClick={addInstance}
         >
-          {t('addInstance')}
+          +
         </button>
       </div>
+
+      {instances.length === 0 ? (
+        <p className="newapi-empty">{t('noInstances')}</p>
+      ) : activeDraft === undefined ? null : (
+        <InstanceEditor
+          key={activeDraft.id === '' ? `blank-${String(activeIndex)}` : activeDraft.id}
+          index={activeIndex}
+          draft={activeDraft}
+          keyConfigured={credentials.get(clientRefOf(activeDraft.id))?.configured}
+          keyLocked={credentials.get(clientRefOf(activeDraft.id))?.locked ?? false}
+          api={api}
+          t={t}
+          fetchModelParams={fetchModelParams}
+          probe={probe}
+          parseChannelConn={parseChannelConn}
+          onPatch={(patch) => { patchInstance(activeIndex, patch) }}
+          onPendingKey={(value) => { handlePendingKey(activeIndex, value) }}
+          onRemove={() => { removeInstance(activeIndex) }}
+        />
+      )}
 
       <p className="newapi-hint">{t('modelHint')}</p>
 

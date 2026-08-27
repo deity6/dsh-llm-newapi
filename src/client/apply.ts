@@ -100,6 +100,48 @@ const SECTION_CSS = `
 .newapi-linkbutton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
 .newapi-linkbutton:disabled { opacity: 0.4; cursor: default; }
 .newapi-empty { margin: 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
+.newapi-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 4px 0 12px;
+  scrollbar-width: thin;
+}
+.newapi-tab {
+  flex: 0 0 auto;
+  max-width: 180px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-3);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color .12s, border-color .12s, color .12s;
+}
+.newapi-tab:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.newapi-tabActive {
+  color: #fff;
+  background: var(--dsw-alias-state-business-primary);
+  border-color: var(--dsw-alias-state-business-primary);
+}
+.newapi-tabActive:hover { background: var(--dsw-alias-state-business-primary); color: #fff; }
+.newapi-tabLabel { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.newapi-tabAdd {
+  color: var(--dsw-alias-label-tertiary);
+  background: transparent;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  padding: 6px 12px;
+  font-size: 16px;
+  line-height: 16px;
+}
+.newapi-tabAdd:hover { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-label-dimmed); background: var(--dsw-alias-interactive-bg-hover); }
 .newapi-entry {
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 8px;
