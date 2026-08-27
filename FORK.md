@@ -74,4 +74,19 @@ registerChannelConnParser('mygw_token', (obj) => {
     自动填网关地址 + 密钥并自动跑一次探测。
   - baseURL 字段加提示（只填到 /v1，adapter 自动拼 /chat/completions 与 /models）；
     探测结果卡 + 导入面板样式随 `--dsw-alias-*` 令牌走明暗主题。
+- `0.9.0`：**多实例架构**。设置命名空间从扁平单网关改为 `{ instances: [...] }` 列表，
+  每个实例独立注册自己的 provider 路由 `newapi-<id>` 与凭据引用 `newapi_<id>`
+  （凭据 ref 禁止连字符，故用下划线），可同时配置多个 newapi 站点互不串 key：
+  - **host**（`src/index.ts`）：`instanceEntriesOf()` 迁移旧扁平配置 → 单个 `default` 实例
+    （升级无缝）；每实例独立 adapter + `optionsFor(id)` 解析（沿用 last-good 缓存）；
+    `syncRegistrations()` 随设置快照增删实例（dispose/replace 原子操作）；discovery/probe/
+    models-dev 三个 RPC 单入口按草稿分派；`ProbeRequest` 新增 `proxyUrl` 使每实例的
+    独立代理能如实探测。导出 `sanitizeInstanceId/routeOf/refOf` 供测试。
+  - **client**（`NewApiSection.tsx` 重写 + 新 `InstanceEditor.tsx`）：实例列表编辑器，
+    每实例一张卡（ID/名称/密钥/地址/代理/模型 + 探测 + 描述符导入 + 上移/下移/删除），
+    全局保存写 `instances` 与逐实例待存密钥；加载时兼容旧扁平 section 值。
+  - **seekai 接入**：`settings.yaml` 迁移为 `instances: [{id: seekai, displayName: seekai, …}]`，
+    凭据补 `newapi_seekai`，默认模型路由改 `newapi-seekai`。
+  - 回归：`test/multi-instance-smoke.mjs`（route/ref/迁移/多实例独立解析）、
+    `test/migrate-smoke.mjs`（真实 settings.yaml 解析）。
   客户端类型在 `params-types.ts` 镜像 host `types.ts`（客户端 `rootDir: src/client` 不能跨目录 import）。

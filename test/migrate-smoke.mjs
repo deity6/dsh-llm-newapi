@@ -1,0 +1,34 @@
+import { readFileSync } from 'node:fs'
+import yaml from 'yaml'
+import { Config, instanceEntriesOf, routeOf, refOf, resolveAdapterOptions } from '../lib/index.js'
+
+let failures = 0
+const check = (label, cond, extra = '') => {
+  console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}${extra ? '  -> ' + extra : ''}`)
+  if (!cond) failures++
+}
+
+// 解析真实 settings.yaml 的 llm-newapi 段
+const raw = readFileSync('C:/Users/Deity/.dsh/settings.yaml', 'utf8')
+const doc = yaml.parse(raw)
+const section = Config(doc['llm-newapi'] ?? {})
+const entries = instanceEntriesOf(section)
+check('settings.yaml → 1 个实例', entries.length === 1, JSON.stringify(entries.map(e => e.id)))
+const seekai = entries[0]
+check('实例 id = seekai', seekai.id === 'seekai')
+check('displayName = seekai', seekai.displayName === 'seekai')
+check('route = newapi-seekai', routeOf(seekai.id) === 'newapi-seekai', routeOf(seekai.id))
+check('ref = newapi_seekai', refOf(seekai.id) === 'newapi_seekai', refOf(seekai.id))
+const opts = resolveAdapterOptions(seekai.instance, undefined, refOf(seekai.id))
+check('baseURL = https://seekai.cc/v1', opts.baseURL === 'https://seekai.cc/v1', opts.baseURL)
+check('proxyUrl 生效', opts.proxyUrl === 'http://127.0.0.1:7890', opts.proxyUrl)
+check('models 数量 = 8', opts.models.length === 8, String(opts.models.length))
+check('默认模型 glm-5-2 在列', opts.models.some(m => m.id === 'glm-5-2'))
+
+// 旧扁平格式仍能迁移（回归）
+const legacy = Config({ baseURL: 'https://x/v1', models: [{ id: 'm1' }] })
+const le = instanceEntriesOf(legacy)
+check('旧扁平 → default 实例', le.length === 1 && le[0].id === 'default')
+
+console.log(failures === 0 ? '\nALL PASS ✅' : `\n${failures} FAIL ❌`)
+process.exit(failures === 0 ? 0 : 1)

@@ -302,4 +302,10 @@ export interface ProbeRequest {
   chatModel?: string
   /** Time bound for the chat probe, milliseconds (default 20_000). */
   chatTimeoutMs?: number
+  /**
+   * Forward proxy to route both probe requests through; overrides the
+   * instance snapshot's proxy so an instance with its own proxy probes
+   * truthfully.
+   */
+  proxyUrl?: string
 }

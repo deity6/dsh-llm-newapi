@@ -15,8 +15,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { assertUsableApiKey, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
-import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
+import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -60,36 +61,91 @@ export const inject = ['llm']
 
 const NS = settingsNamespace('llm-newapi')
 /**
- * Fixed credential reference for the gateway API key. Deliberately not an
- * environment-variable-style name: the inherited process environment is the
- * credentials service's read-only top layer, so an `NEWAPI_API_KEY`-style
- * ref would let a stray exported variable shadow the web-stored key and lock
- * the settings input read-only. `newapi` names the route, and the web
- * settings page is the one configuration surface for the value.
+ * Legacy single-route credential reference, kept as the migration fallback:
+ * a pre-0.9.0 config (flat `baseURL`/`models`/`proxy` in the namespace) maps
+ * to one instance whose credential still resolves through `newapi`. New
+ * instances use per-instance refs `newapi_<id>`.
  */
 const API_KEY_REF = 'newapi'
 /** Environment variable naming this provider's endpoint, honored only from trusted layers. */
 const BASE_URL_ENV = 'NEWAPI_BASE_URL'
 /** Placeholder gateway base used when neither config nor environment names one. */
 export const DEFAULT_BASE_URL = 'https://newapi.example.com/v1'
-/** The single provider route this plugin owns. */
-const PROVIDER = 'newapi'
+/** Provider route prefix every instance owns: `newapi-<id>`. */
+export const ROUTE_PREFIX = 'newapi'
+/** Credential ref prefix every instance owns: `newapi_<id>` (refs forbid dashes). */
+const REF_PREFIX = 'newapi'
+
+/**
+ * Normalize a user-facing instance id to the route/ref-safe form used
+ * everywhere (`newapi-seekai` → route, `newapi_seekai` → credential ref).
+ * Empty or all-punctuation ids fall back to `default`.
+ * @param id - the raw instance id from settings.
+ * @returns the sanitized id.
+ */
+export function sanitizeInstanceId(id: string): string {
+  const safe = id.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return safe.length > 0 ? safe : 'default'
+}
+
+/** Provider route id for one instance (`newapi-<id>`). */
+export function routeOf(id: string): string {
+  return `${ROUTE_PREFIX}-${sanitizeInstanceId(id)}`
+}
+
+/** Credential reference for one instance (`newapi_<id>`). */
+export function refOf(id: string): CredentialRef {
+  return credentialRef(`${REF_PREFIX}_${sanitizeInstanceId(id).replace(/-/g, '_')}`)
+}
+
+/**
+ * One configurable NewAPI gateway instance. The settings namespace holds a
+ * LIST of these; each registers its own provider route `newapi-<id>` and
+ * credential reference `newapi_<id>`, so several gateways can be configured
+ * side by side without sharing keys. Field meanings match the legacy flat
+ * `Config` fields below.
+ */
+export interface NewApiInstanceConfig {
+  /**
+   * Unique route suffix: becomes provider route `newapi-<id>` and credential
+   * reference `newapi_<id>`. Sanitized (lowercased, non-alphanumerics to
+   * `-`); empty falls back to `default`.
+   */
+  id: string
+  /** Display name shown in the provider picker; defaults to `id`. */
+  displayName?: string
+  /** Gateway base including the `/v1` prefix. */
+  baseURL?: string
+  /** Advisory models shown by discovery consumers; defaults to none. */
+  models?: NewApiCatalogModel[]
+  /** Non-chat model exclusion patterns; replaces the default list. */
+  modelExcludePatterns?: string[]
+  /** Positive context capacity used when a model has no exact value. */
+  defaultContextWindow?: number
+  /** Default per-request output cap. */
+  maxTokens?: number
+  /** Maximum gateway idle time while one stream read is outstanding. */
+  streamIdleTimeoutMs?: number
+  /** Forward proxy for this instance's gateway traffic. */
+  proxy?: ProxyConfig
+  /** Match-shaping hints for the models.dev params lookup. */
+  providerHints?: ProviderHints
+  /** Provider-owned model-request retry policy. */
+  retryPolicy?: RetryPolicyConfig
+}
 
 /**
  * Plugin config, validated by the same-named schemastery schema and doubling
- * as the `llm-newapi` settings-section shape. Every field is optional in
- * yml: `baseURL` falls back to $NEWAPI_BASE_URL from a trusted environment
- * layer, then the placeholder {@link DEFAULT_BASE_URL} — a request against
- * the placeholder fails as TRANSPORT at first use, naming the endpoint to
- * fix. The API key is not a config value at all: it lives in the
- * credentials store under the fixed reference `newapi` (the web settings
- * page writes it), and a request without any stored key fails with
- * `MISSING_CREDENTIAL`, not at plugin load.
+ * as the `llm-newapi` settings-section shape. Since 0.9.0 the section stores
+ * {@link instances}; the legacy flat fields remain for migration and are
+ * folded into one `default` instance when `instances` is absent.
  */
 export interface Config {
-  /** Gateway base including the `/v1` prefix; defaults to $NEWAPI_BASE_URL from a trusted layer, then the placeholder `https://newapi.example.com/v1`. */
+  /** 0.9.0+ shape: every configured gateway, one per entry. */
+  instances?: NewApiInstanceConfig[]
+  /** @deprecated Legacy single-instance gateway base; folded into `default`. */
   baseURL?: string
-  /** Advisory models shown by discovery consumers; defaults to none — a gateway's model set is deployment-specific. */
+  /** @deprecated Legacy single-instance model catalog. */
   models?: NewApiCatalogModel[]
   /**
    * Case-insensitive id substrings excluding discovered models that cannot
@@ -148,7 +204,26 @@ const proxySchema: z<ProxyConfig> = z.object({
   url: z.string().default(DEFAULT_PROXY_URL),
 })
 
+/** One gateway instance entry; mirrors the legacy flat Config fields. */
+const instanceSchema: z<NewApiInstanceConfig> = z.object({
+  id: z.string().required(),
+  displayName: z.string(),
+  baseURL: z.string(),
+  models: z.array(catalogModel).default([]),
+  modelExcludePatterns: z.array(z.string()).default([...DEFAULT_MODEL_EXCLUDE_PATTERNS]),
+  defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
+  maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+  streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  proxy: proxySchema.default({ enabled: false, url: DEFAULT_PROXY_URL }),
+  providerHints: z.object({
+    defaults: z.object({}),
+    models: z.object({}),
+  }),
+  retryPolicy: RetryPolicySchema,
+})
+
 export const Config: z<Config> = z.object({
+  instances: z.array(instanceSchema).default([]),
   baseURL: z.string(),
   models: z.array(catalogModel).default([]),
   modelExcludePatterns: z.array(z.string()).default([...DEFAULT_MODEL_EXCLUDE_PATTERNS]),
@@ -219,12 +294,19 @@ function resolveModels(models: readonly NewApiCatalogModel[] | undefined): NewAp
  * facts. Programmatic construction may bypass Schemastery normalization, so
  * every default and bound is re-judged here — for the composition entry at
  * load (fail loud) and for each settings snapshot at its first use.
- * @param config - raw plugin config or resolved settings snapshot.
+ * @param config - raw plugin config or resolved settings snapshot (an
+ *   instance entry is the same shape minus the instance id fields).
  * @param environment - this run's environment layers, or `undefined` outside
  * the product CLI. A trusted layer may supply the gateway endpoint.
+ * @param ref - the credential reference this connection resolves keys
+ *   through; defaults to the legacy `newapi` ref (migration path).
  * @returns validated connection facts plus the credential reference.
  */
-export function resolveAdapterOptions(config: Config, environment?: ReturnType<typeof launchEnvironmentOf>): ResolvedNewApiOptions {
+export function resolveAdapterOptions(
+  config: Config | NewApiInstanceConfig,
+  environment?: ReturnType<typeof launchEnvironmentOf>,
+  ref: CredentialRef = credentialRef(API_KEY_REF),
+): ResolvedNewApiOptions {
   // Absent everywhere is the placeholder, not a load failure: the plugin stays
   // mountable so configuration surfaces can offer the route, and a request
   // against the placeholder fails as TRANSPORT at first use, naming the
@@ -269,7 +351,7 @@ export function resolveAdapterOptions(config: Config, environment?: ReturnType<t
   }
   return {
     baseURL: normalizeBaseUrl(rawBase),
-    apiKeyRef: credentialRef(API_KEY_REF),
+    apiKeyRef: ref,
     models: resolveModels(config.models),
     modelExcludePatterns,
     defaultContextWindow,
@@ -284,30 +366,59 @@ export function resolveAdapterOptions(config: Config, environment?: ReturnType<t
   }
 }
 
+/**
+ * The configured instances, folding the legacy flat config into one
+ * `default` instance when `instances` is absent so a pre-0.9.0 settings
+ * section keeps working unchanged.
+ * @param raw - the current plugin config / settings snapshot.
+ * @returns per-instance entries, each with its sanitized id, display name,
+ *   and the instance config to resolve.
+ */
+export function instanceEntriesOf(raw: Config): ReadonlyArray<{ id: string; displayName: string; instance: NewApiInstanceConfig }> {
+  if (raw.instances !== undefined && raw.instances.length > 0) {
+    return raw.instances.map(instance => ({
+      id: sanitizeInstanceId(instance.id),
+      displayName: instance.displayName ?? instance.id,
+      instance,
+    }))
+  }
+  const hasLegacy = raw.baseURL !== undefined || (raw.models?.length ?? 0) > 0
+  if (!hasLegacy) return []
+  return [{ id: 'default', displayName: 'NewAPI', instance: { id: 'default', ...raw } }]
+}
+
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
-  let lastRaw: Config | undefined
-  let lastGood: ResolvedNewApiOptions | undefined
-  const options = (): ResolvedNewApiOptions => {
+
+  const entryList = (): ReadonlyArray<{ id: string; displayName: string; instance: NewApiInstanceConfig }> =>
+    instanceEntriesOf(current())
+
+  // Per-instance resolution with the same last-good caching as the legacy
+  // single-route path: a rejected settings snapshot keeps serving the last
+  // good facts for that instance and logs the reason once.
+  const states = new Map<string, { lastRaw?: Config; lastGood?: ResolvedNewApiOptions }>()
+  const optionsFor = (id: string): ResolvedNewApiOptions => {
     const raw = current()
-    if (raw === lastRaw && lastGood !== undefined) return lastGood
+    const entry = entryList().find(candidate => candidate.id === id)
+    if (entry === undefined) throw new Error(`${PKG}: instance "${id}" is no longer configured`)
+    const state = states.get(id) ?? {}
+    states.set(id, state)
+    if (raw === state.lastRaw && state.lastGood !== undefined) return state.lastGood
     try {
-      const next = resolveAdapterOptions(raw, launchEnvironmentOf(ctx))
-      lastRaw = raw
-      lastGood = next
+      const next = resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refOf(id))
+      state.lastRaw = raw
+      state.lastGood = next
       return next
     } catch (error) {
-      // Static composition resolves before anything registers, so this branch
-      // only sees a live settings snapshot failing a beyond-schema bound:
-      // keep serving the last good facts and say so once per bad snapshot.
-      if (lastGood === undefined) throw error
-      lastRaw = raw
-      ctx.logger.error(`${PKG}: keeping the last good configuration after an invalid settings section`)
+      if (state.lastGood === undefined) throw error
+      state.lastRaw = raw
+      ctx.logger.error(`${PKG}: keeping the last good configuration for instance "${id}" after an invalid settings section`)
       ctx.logger.error(error)
-      return lastGood
+      return state.lastGood
     }
   }
-  options()
+  // Validate the initial composition (fail loud on a bad static config).
+  for (const entry of entryList()) resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refOf(entry.id))
 
   const resolveApiKey = async (connection: ResolvedNewApiOptions): Promise<string> => {
     // Every credential fact comes from the caller's snapshot, so a rejected
@@ -322,7 +433,7 @@ export function apply(ctx: Context, config: Config): void {
       if (hit !== undefined) return assertUsableApiKey(hit.value, PKG, ref)
     }
     throw new LlmError(
-      `${PKG}: no API key for provider route "${PROVIDER}"; configure it on the NewAPI`
+      `${PKG}: no API key for provider route "${ROUTE_PREFIX}"; configure it on the NewAPI`
         + ` settings page in dsh web (credentials reference "${ref}")`,
       'MISSING_CREDENTIAL',
     )
@@ -339,7 +450,7 @@ export function apply(ctx: Context, config: Config): void {
     if (indexCache === undefined || indexCache.routes !== routes) {
       const byModel = new Map<string, string>()
       for (const provider of ctx.llm.listProviders()) {
-        if (provider.id === PROVIDER) continue
+        if (provider.id.startsWith(`${ROUTE_PREFIX}-`)) continue
         try {
           for (const model of await ctx.llm.listModels(provider.id)) {
             byModel.set(model.id, provider.id)
@@ -353,37 +464,80 @@ export function apply(ctx: Context, config: Config): void {
     return indexCache.byModel.get(modelId)
   }
 
-  const adapter = new NewApiAdapter({ options, resolveApiKey, officialProviderOf })
-  ctx.llm.registerConfigurableProviders([
-    {
-      provider: PROVIDER,
-      displayName: 'NewAPI',
-      settingsNs: NS,
-      settingsPath: [],
-      // The adapter knows this route only because configuration declared it:
-      // a self-hosted gateway it ships nothing about.
-      declared: true,
-    },
-  ])
-  // Route effects bind to this apply fiber via the stable `ctx` reference,
-  // even when a swap runs inside the scoped settings callback below.
-  const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
-  let registeredPolicy = options().retryPolicy
-  const ensureRegistrationFacts = (): void => {
-    const policy = options().retryPolicy
-    if (deepEqualJson(policy, registeredPolicy)) return
-    // The registry captures the retry policy at registration, so it is the one
-    // fact per-request resolution cannot refresh. `replace` re-reads it in one
-    // synchronous registry section: disposing and re-registering instead would
-    // publish an empty route set between the two, and an observer that reacted
-    // to it would see this provider disappear and come back.
-    registration.replace([PROVIDER])
-    registeredPolicy = policy
+  // One adapter per instance, each bound to its own provider route
+  // (`newapi-<id>`) and credential reference (`newapi_<id>`), so several
+  // gateways live side by side without sharing keys. The set tracks the
+  // settings snapshot: instances that disappear are disposed, new ones
+  // register, and kept ones refresh their registration-captured retry
+  // policy. Route effects bind to this apply fiber via the stable `ctx`
+  // reference, so a swap inside the scoped settings callback below cannot
+  // outlive the plugin.
+  interface Registration {
+    adapter: NewApiAdapter
+    handle: AdapterRegistrationHandle
+    configurable: DirectoryRegistrationHandle
+    policy: ResolvedRetryPolicy
   }
+  const registrations = new Map<string, Registration>()
+  const syncRegistrations = (): void => {
+    const entries = entryList()
+    const wanted = new Set(entries.map(entry => entry.id))
+    for (const [id, registration] of registrations) {
+      if (wanted.has(id)) continue
+      registration.configurable()
+      registration.handle()
+      registrations.delete(id)
+    }
+    for (const entry of entries) {
+      const existing = registrations.get(entry.id)
+      const route = routeOf(entry.id)
+      if (existing === undefined) {
+        const adapter = new NewApiAdapter({
+          options: () => optionsFor(entry.id),
+          resolveApiKey,
+          officialProviderOf,
+        })
+        const configurable = ctx.llm.registerConfigurableProviders([{
+          provider: route,
+          displayName: entry.displayName,
+          settingsNs: NS,
+          settingsPath: [],
+          // The adapter knows this route only because configuration declared
+          // it: a self-hosted gateway it ships nothing about.
+          declared: true,
+        }])
+        registrations.set(entry.id, {
+          adapter,
+          handle: ctx.llm.registerAdapter([route], adapter),
+          configurable,
+          policy: optionsFor(entry.id).retryPolicy,
+        })
+        continue
+      }
+      const policy = optionsFor(entry.id).retryPolicy
+      if (deepEqualJson(policy, existing.policy)) continue
+      // The registry captures the retry policy at registration, so it is the
+      // one fact per-request resolution cannot refresh. `replace` re-reads it
+      // in one synchronous registry section: disposing and re-registering
+      // instead would publish an empty route set between the two, and an
+      // observer that reacted to it would see this provider vanish.
+      existing.handle.replace([route])
+      existing.policy = policy
+    }
+  }
+  // Register whatever the composition already declares; the settings section
+  // below re-syncs when its snapshot changes.
+  syncRegistrations()
+
   // Model discovery for the settings namespace this plugin owns: the Models
   // page interrogates the gateway's /models with the draft's endpoint and
-  // one-shot credential, or the current snapshot's facts.
-  ctx.llm.registerModelDiscovery(NS, request => adapter.discoverModels(request))
+  // one-shot credential, or the current snapshot's facts. One handler serves
+  // every instance — the draft names the endpoint, and the snapshot
+  // fallback uses the first configured instance.
+  ctx.llm.registerModelDiscovery(NS, request => {
+    const first = registrations.values().next()?.value?.adapter
+    return first === undefined ? Promise.resolve([]) : first.discoverModels(request)
+  })
 
   // Host-side endpoint for the「更新模型信息」action: the browser names
   // the gateway model ids (and optionally the proxy draft) and the host
@@ -414,8 +568,20 @@ export function apply(ctx: Context, config: Config): void {
       const request = payload as ProbeRequest
       // The probe is a self-contained health check: it normalizes the drafted
       // base, resolves the one-shot key (or the stored credential), and calls
-      // GET /models. A thrown value becomes the error envelope so the settings
-      // page sees the real cause instead of an opaque HTTP 500.
+      // GET /models. Any instance's adapter serves it — the draft names the
+      // endpoint — so the first configured instance answers; without any
+      // instance the failure is a clean error envelope.
+      const adapter = registrations.values().next()?.value?.adapter
+      if (adapter === undefined) {
+        return Promise.resolve({
+          ok: false as const,
+          error: {
+            code: 'internal' as const,
+            message: 'llm-newapi: no NewAPI instances are configured; add one on the settings page first',
+            details: {},
+          },
+        })
+      }
       return adapter.probeConnection({ ...request, signal })
         .then(value => ({ ok: true as const, value }))
         .catch((error: unknown) => ({
@@ -438,6 +604,17 @@ export function apply(ctx: Context, config: Config): void {
         // transport maps a thrown handler to an opaque HTTP 500, which hides
         // the actual reason (unreachable endpoint, dead proxy) from the
         // settings page that asked.
+        const adapter = registrations.values().next()?.value?.adapter
+        if (adapter === undefined) {
+          return Promise.resolve({
+            ok: false as const,
+            error: {
+              code: 'internal' as const,
+              message: 'llm-newapi: no NewAPI instances are configured',
+              details: {},
+            },
+          })
+        }
         return adapter.fetchModelsDevParams(request, signal)
           .then(value => ({ ok: true as const, value }))
           .catch((error: unknown) => ({
@@ -455,15 +632,20 @@ export function apply(ctx: Context, config: Config): void {
 
   installSettingsSection(ctx, NS, Config, config, {
     // Refuse an unserviceable section where it is written: without this a
-    // schema-valid value the adapter cannot serve (a non-http(s) baseURL,
-    // an empty exclude-pattern entry) stores with a success notice and
-    // then silently keeps the last good facts at every request.
+    // schema-valid value no instance can serve (a non-http(s) baseURL, an
+    // empty exclude-pattern entry) stores with a success notice and then
+    // silently keeps the last good facts at every request.
     validate: (value) => {
-      resolveAdapterOptions(value, launchEnvironmentOf(ctx))
+      for (const entry of instanceEntriesOf(value)) {
+        resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refOf(entry.id))
+      }
     },
     setSource: (source) => {
       current = source
+      syncRegistrations()
     },
-    onChange: ensureRegistrationFacts,
+    onChange: () => {
+      syncRegistrations()
+    },
   })
 }

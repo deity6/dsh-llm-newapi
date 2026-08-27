@@ -652,6 +652,11 @@ export class NewApiAdapter extends LlmAdapter {
       }
     }
     let response: Response
+    // An instance with its own forward proxy probes truthfully: the request
+    // override beats the snapshot's proxy.
+    const proxyUrl = request.proxyUrl !== undefined && request.proxyUrl.length > 0
+      ? request.proxyUrl
+      : connection.proxyUrl
     try {
       response = await gatewayFetch(`${base}/models`, {
         method: 'GET',
@@ -661,7 +666,7 @@ export class NewApiAdapter extends LlmAdapter {
           ...attributionHeaders(),
         },
         ...request.signal === undefined ? {} : { signal: request.signal },
-      }, connection.proxyUrl)
+      }, proxyUrl)
     } catch (error: unknown) {
       const latencyMs = Date.now() - started
       if (request.signal?.aborted) {
@@ -700,7 +705,7 @@ export class NewApiAdapter extends LlmAdapter {
     // succeeded (a rejected key would waste the request) and only when the
     // caller named a chat model. Billed a handful of tokens at most.
     if (result.authValid === true && request.chatModel !== undefined) {
-      result.chat = await this.probeChat(base, apiKey, connection, request)
+      result.chat = await this.probeChat(base, apiKey, proxyUrl, request)
     }
     return result
   }
@@ -712,14 +717,14 @@ export class NewApiAdapter extends LlmAdapter {
    * as a structured {@link ChatProbeResult}.
    * @param base - normalized gateway base (chat path appended here).
    * @param apiKey - the resolved probe credential.
-   * @param connection - connection snapshot (carries the forward proxy).
+   * @param proxyUrl - the effective forward proxy (request override or snapshot).
    * @param request - the probe draft (chat model, timeout, cancellation).
    * @returns the chat outcome — never throws.
    */
   private async probeChat(
     base: string,
     apiKey: string,
-    connection: NewApiConnectionOptions,
+    proxyUrl: string | undefined,
     request: ProbeRequest,
   ): Promise<ChatProbeResult> {
     const chatStarted = Date.now()
@@ -744,7 +749,7 @@ export class NewApiAdapter extends LlmAdapter {
           stream: false,
         }),
         signal: controller.signal,
-      }, connection.proxyUrl)
+      }, proxyUrl)
       const latencyMs = Date.now() - chatStarted
       let body: {
         choices?: Array<{ message?: { content?: string }; finish_reason?: string }>

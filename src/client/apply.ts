@@ -186,6 +186,24 @@ const SECTION_CSS = `
   font-variant-numeric: tabular-nums; text-align: left;
 }
 .newapi-params-unmatched { color: var(--dsw-alias-label-dimmed); font-size: 12px; padding: 4px 0; }
+/* One gateway instance card. */
+.newapi-instance {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  padding: 14px 14px 4px;
+  margin: 0 0 14px;
+}
+.newapi-instance-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 0 2px 10px;
+}
+.newapi-instance-title {
+  font-size: 13px; line-height: 20px; font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+.newapi-instance-actions {
+  display: flex; align-items: center; gap: 2px;
+}
 `
 
 /** Required services (cordis fiber inject): the section slot, copy, and the wire face. */

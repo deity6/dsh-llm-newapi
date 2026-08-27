@@ -83,6 +83,8 @@ export interface ProbeRequest {
   chatModel?: string
   /** Time bound for the chat probe, milliseconds (host default 20_000). */
   chatTimeoutMs?: number
+  /** Forward proxy for the probe requests; overrides the snapshot's proxy. */
+  proxyUrl?: string
 }
 
 /** Connection facts parsed from a channel-connection descriptor. */

@@ -1,20 +1,16 @@
 /**
- * The NewAPI settings section: API key (write-only), gateway base URL, and
- * the model catalog with endpoint interrogation. Pure props — no ctx, no
- * contexts, no subscription machinery; everything arrives through the inject
- * face the apply closure owns (api wire face + bound translate). Styles come
- * from the fiber-scoped `newapi-*` stylesheet the apply closure injects; it
- * rides the shell's `--dsw-alias-*` tokens, so light and dark themes both
- * render correctly.
- *
- * The model catalog mirrors the official Models page (`ModelListEditor`):
- * one bordered entry per model with id and display name on the row, the two
- * token capacities behind the row's own disclosure, K/M-suffixed capacity
- * entry, and per-field text buffers so a count is not rewritten mid-word.
+ * The NewAPI settings section: a LIST of gateway instances, each its own
+ * card ({@link InstanceEditor}). The parent owns the persistent drafts and
+ * the global Save (writes `{ instances: [...] }` into the `llm-newapi`
+ * namespace and any pending per-instance keys into the credentials seam).
+ * A pre-0.9.0 flat section value (top-level `baseURL`/`models`/`proxy`)
+ * loads as one `default` instance so nothing breaks on upgrade.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import type { ReactNode } from 'react'
-import type { DiscoveredModelView, IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-client-connection/client'
+import type { IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-client-connection/client'
+import { DEFAULT_PROXY_URL, InstanceEditor, sanitizeClientId, clientRefOf } from './InstanceEditor.tsx'
+import type { InstanceDraft, ModelDraft } from './InstanceEditor.tsx'
 import type { NewApiKey } from './locale.ts'
 import type {
   ModelsDevParamsRequest,
@@ -24,104 +20,6 @@ import type {
   ProbeResult,
 } from './params-types.ts'
 
-/**
- * One catalog entry, structurally open like the official editors: a field
- * this card does not edit survives being edited here rather than being
- * dropped by a rebuild.
- */
-type ModelDraft = Record<string, unknown>
-
-/** A row's text field, or the empty string when unset or not a string. */
-function textOf(model: ModelDraft, key: string): string {
-  const value = model[key]
-  return typeof value === 'string' ? value : ''
-}
-
-/** A row's numeric field, or `undefined` when unset or not a number. */
-function numberOf(model: ModelDraft, key: string): number | undefined {
-  const value = model[key]
-  return typeof value === 'number' ? value : undefined
-}
-
-/** The two token counts edited as K/M-suffixed text behind a row's disclosure. */
-type CapacityField = 'contextWindow' | 'maxTokens'
-
-/** Accepted capacity spellings: a decimal count with an optional K/M suffix. */
-const CAPACITY_PATTERN = /^(\d+(?:\.\d+)?)([km])?$/i
-
-/** Decimal suffix scales — `1M` is 1000K, matching how model capacities are quoted. */
-const CAPACITY_SCALE = { k: 1_000, m: 1_000_000 } as const
-
-/**
- * Read a typed capacity, so a user can write `256K` or `1M` instead of
- * counting zeroes. The stored value stays a plain token count.
- * @param text - raw field text.
- * @returns the count; `undefined` when blank (drop), `NaN` when unreadable.
- */
-function parseCapacity(text: string): number | undefined {
-  const trimmed = text.trim()
-  if (trimmed.length === 0) return undefined
-  const match = CAPACITY_PATTERN.exec(trimmed)
-  if (match === null) return Number.NaN
-  const suffix = match[2]?.toLowerCase()
-  const scale = suffix === 'k' || suffix === 'm' ? CAPACITY_SCALE[suffix] : 1
-  const scaled = Number(match[1]) * scale
-  // A decimal multiple is exact in intent but not in binary floating point,
-  // so an integral intent snaps back.
-  const rounded = Math.round(scaled)
-  return Math.abs(scaled - rounded) < 1e-6 ? rounded : scaled
-}
-
-/**
- * Spell a stored count back in the shortest form that survives a round trip
- * through {@link parseCapacity}; a count that is not a whole number of
- * thousands stays written out.
- * @param value - stored capacity.
- * @returns the field text.
- */
-function formatCapacity(value: number): string {
-  if (!Number.isInteger(value) || value <= 0) return String(value)
-  if (value % CAPACITY_SCALE.m === 0) return `${String(value / CAPACITY_SCALE.m)}M`
-  if (value % CAPACITY_SCALE.k === 0) return `${String(value / CAPACITY_SCALE.k)}K`
-  return String(value)
-}
-
-/**
- * What an empty capacity field is worth, shown as its placeholder: the
- * adapter's route-level fallback (`defaultContextWindow` 128,000) spelled
- * the way a person would say it. A hint, not a mirror — leaving the field
- * blank keeps the adapter's default.
- */
-const CAPACITY_HINT: Readonly<Record<CapacityField, string>> = {
-  contextWindow: '128K',
-  maxTokens: '8K',
-}
-
-/** Disclosure chevron; rotates to point down while its row is open. */
-function IconChevron({ open }: { open: boolean }): ReactNode {
-  return (
-    <svg
-      width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden
-      style={{ transform: open ? 'rotate(90deg)' : undefined, transition: 'transform 120ms ease' }}
-    >
-      <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-/** Removal glyph for one model row. */
-function IconTrash(): ReactNode {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9a1 1 0 001 .9h4.6a1 1 0 001-.9L12 4M6.5 6.8v4.4M9.5 6.8v4.4"
-        stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
-
-/** Inject face: the wire face, the bound translate, and the models.dev params call. */
 export interface NewApiSectionProps {
   api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
   t: (key: NewApiKey) => string
@@ -140,94 +38,128 @@ export interface NewApiSectionProps {
 }
 
 const NS = 'llm-newapi'
-/** Credential reference the host half resolves per request (see apply.ts). */
-const KEY_REF = 'newapi'
 
-/** The proxy text box's default and placeholder (mirrors the host default). */
-const DEFAULT_PROXY_URL = 'http://127.0.0.1:7890'
+/** Per-instance credential view, keyed by credential ref. */
+interface CredentialView {
+  configured?: boolean
+  locked: boolean
+}
 
-/** Convert a stored section value into editable rows without dropping fields. */
-function toDrafts(source: unknown): ModelDraft[] {
-  if (!Array.isArray(source)) return []
-  return source.map(entry =>
-    typeof entry === 'object' && entry !== null && !Array.isArray(entry)
-      ? entry as ModelDraft
-      : {})
+/** A row's text field, or the empty string when unset or not a string. */
+function textOf(model: ModelDraft, key: string): string {
+  const value = model[key]
+  return typeof value === 'string' ? value : ''
+}
+
+/** A row's numeric field, or `undefined` when unset or not a number. */
+function numberOf(model: ModelDraft, key: string): number | undefined {
+  const value = model[key]
+  return typeof value === 'number' ? value : undefined
+}
+
+/** Convert the stored section value into editable drafts, legacy-aware. */
+function toDrafts(source: unknown): InstanceDraft[] {
+  if (typeof source !== 'object' || source === null) return []
+  const value = source as Record<string, unknown>
+  if (Array.isArray(value.instances)) {
+    return value.instances.map(entry =>
+      typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+        ? draftOf(entry as Record<string, unknown>)
+        : blankDraft())
+  }
+  // Legacy flat section: one `default` instance.
+  const hasLegacy = typeof value.baseURL === 'string' || Array.isArray(value.models)
+  if (!hasLegacy) return []
+  const proxy = (value.proxy ?? {}) as { enabled?: unknown; url?: unknown }
+  return [{
+    id: 'default',
+    displayName: 'NewAPI',
+    baseURL: typeof value.baseURL === 'string' ? value.baseURL : '',
+    models: Array.isArray(value.models)
+      ? value.models.filter(entry => typeof entry === 'object' && entry !== null && !Array.isArray(entry)) as ModelDraft[]
+      : [],
+    proxyEnabled: proxy.enabled === true,
+    proxyUrl: typeof proxy.url === 'string' && proxy.url.length > 0 ? proxy.url : DEFAULT_PROXY_URL,
+  }]
+}
+
+function draftOf(entry: Record<string, unknown>): InstanceDraft {
+  const proxy = (entry.proxy ?? {}) as { enabled?: unknown; url?: unknown }
+  return {
+    id: typeof entry.id === 'string' ? entry.id : '',
+    displayName: typeof entry.displayName === 'string' ? entry.displayName : '',
+    baseURL: typeof entry.baseURL === 'string' ? entry.baseURL : '',
+    models: Array.isArray(entry.models)
+      ? entry.models.filter(model => typeof model === 'object' && model !== null && !Array.isArray(model)) as ModelDraft[]
+      : [],
+    proxyEnabled: proxy.enabled === true,
+    proxyUrl: typeof proxy.url === 'string' && proxy.url.length > 0 ? proxy.url : DEFAULT_PROXY_URL,
+  }
+}
+
+function blankDraft(): InstanceDraft {
+  return {
+    id: `gw-${Date.now().toString(36)}`,
+    displayName: '',
+    baseURL: '',
+    models: [],
+    proxyEnabled: false,
+    proxyUrl: DEFAULT_PROXY_URL,
+  }
+}
+
+/** Serialize one instance draft into the stored entry shape. */
+function serializeInstance(draft: InstanceDraft): Record<string, unknown> {
+  const models = draft.models.map(model => {
+    const id = textOf(model, 'id').trim()
+    const name = textOf(model, 'name').trim()
+    const contextWindow = numberOf(model, 'contextWindow')
+    const maxTokens = numberOf(model, 'maxTokens')
+    const efforts = Array.isArray(model.reasoningEfforts)
+      ? model.reasoningEfforts.filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
+      : []
+    const preset = typeof model.defaultReasoningEffort === 'string'
+      && efforts.includes(model.defaultReasoningEffort)
+      ? model.defaultReasoningEffort
+      : undefined
+    return {
+      id,
+      ...name.length > 0 ? { name } : {},
+      ...contextWindow !== undefined ? { contextWindow } : {},
+      ...maxTokens !== undefined ? { maxTokens } : {},
+      ...efforts.length > 0 ? { reasoningEfforts: efforts } : {},
+      ...preset !== undefined ? { defaultReasoningEffort: preset } : {},
+    }
+  })
+  return {
+    id: sanitizeClientId(draft.id),
+    ...draft.displayName.trim().length > 0 ? { displayName: draft.displayName.trim() } : {},
+    ...draft.baseURL.trim().length > 0 ? { baseURL: draft.baseURL.trim() } : {},
+    models,
+    proxy: {
+      enabled: draft.proxyEnabled,
+      url: draft.proxyUrl.trim().length > 0 ? draft.proxyUrl.trim() : DEFAULT_PROXY_URL,
+    },
+  }
 }
 
 /**
- * The highest rung in a row's declared efforts — the dropdown's value when
- * no preset has been chosen yet.
- */
-const EFFORT_RUNG: Readonly<Record<string, number>> = {
-  max: 7, xhigh: 6, high: 5, medium: 4, low: 3, minimal: 2, none: 1, default: 0,
-}
-
-function highestOf(efforts: readonly unknown[]): string {
-  const ids = efforts.filter((effort): effort is string => typeof effort === 'string')
-  return [...ids].sort((a, b) => (EFFORT_RUNG[b] ?? -1) - (EFFORT_RUNG[a] ?? -1))[0] ?? ''
-}
-
-/** Buffer key for one capacity field; the row half moves when rows do. */
-function bufferKey(index: number, field: CapacityField): string {
-  return `${String(index)}:${field}`
-}
-
-/**
- * Render the NewAPI settings section.
+ * Render the NewAPI settings section: one card per gateway instance.
  * @param props - the wire face and the bound translate.
  * @returns the section.
  */
 export function NewApiSection(props: NewApiSectionProps): ReactNode {
-  const { api, t } = props
+  const { api, t, fetchModelParams, probe, parseChannelConn } = props
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [errorText, setErrorText] = useState<string | undefined>(undefined)
   const [revision, setRevision] = useState<number>(0)
   const [writable, setWritable] = useState(true)
-  const [keyConfigured, setKeyConfigured] = useState<boolean | undefined>(undefined)
-  /** Whether the credential seam reports the key reference read-only (launch environment). */
-  const [keyLocked, setKeyLocked] = useState(false)
-  const [baseURL, setBaseURL] = useState('')
-  const [keyDraft, setKeyDraft] = useState('')
-  const [models, setModels] = useState<ModelDraft[]>([])
-  // Rows carry an id and a name; capacities stay folded behind the row's own
-  // disclosure rather than crowding every row with four inputs.
-  const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set())
-  // Capacities are edited as text, so a field's keystrokes are held here
-  // rather than re-derived from the parsed count on every change — that
-  // would rewrite `1000` to `1K` mid-word. One entry per field: a single
-  // buffer would be displaced by editing any other field.
-  const [editing, setEditing] = useState<ReadonlyMap<string, string>>(new Map())
+  const [instances, setInstances] = useState<InstanceDraft[]>([])
+  const [credentials, setCredentials] = useState<ReadonlyMap<string, CredentialView>>(new Map())
+  /** Pending per-instance keys to store on Save: ref → value. */
+  const [pendingKeys, setPendingKeys] = useState<ReadonlyMap<string, string>>(new Map())
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | undefined>(undefined)
-  const [candidates, setCandidates] = useState<readonly DiscoveredModelView[] | undefined>(undefined)
-  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
-  /** Proxy draft for the models.dev download; persisted with the section. */
-  const [proxyEnabled, setProxyEnabled] = useState(false)
-  const [proxyUrl, setProxyUrl] = useState<string>(DEFAULT_PROXY_URL)
-  /** models.dev lookup result the params panel resolves against. */
-  const [params, setParams] = useState<ModelsDevParamsResponse | undefined>(undefined)
-  /** Chosen match index per model id, for ids with several providers. */
-  const [paramChoices, setParamChoices] = useState<ReadonlyMap<string, number>>(new Map())
-  const [paramsBusy, setParamsBusy] = useState(false)
-  /** Connectivity probe state: busy flag + the latest result card. */
-  const [probeBusy, setProbeBusy] = useState(false)
-  const [probeResult, setProbeResult] = useState<ProbeResult | undefined>(undefined)
-  /** Whether the probe should also run a minimal-cost chat completion. */
-  const [probeWithChat, setProbeWithChat] = useState(false)
-  /** Channel-connection descriptor import: open, draft text, busy, error. */
-  const [importOpen, setImportOpen] = useState(false)
-  const [importText, setImportText] = useState('')
-  const [importBusy, setImportBusy] = useState(false)
-  const [importError, setImportError] = useState<string | undefined>(undefined)
-  /** The result panel, scrolled into view when a lookup lands. */
-  const paramsRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    // Feedback that the lookup finished: the panel may render below the
-    // fold behind a long model list, so bring it to the user. The optional
-    // call keeps non-browser test environments safe.
-    paramsRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
-  }, [params])
 
   const load = async (): Promise<void> => {
     setStatus('loading')
@@ -246,20 +178,26 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
         setStatus('error')
         return
       }
-      const value = (section.value ?? {}) as Record<string, unknown>
       setRevision(section.revision)
-      setBaseURL(typeof value.baseURL === 'string' ? value.baseURL : '')
-      setModels(toDrafts(value.models))
-      const proxy = (value.proxy ?? {}) as { enabled?: unknown; url?: unknown }
-      setProxyEnabled(proxy.enabled === true)
-      if (typeof proxy.url === 'string' && proxy.url.length > 0) setProxyUrl(proxy.url)
-      setExpanded(new Set())
-      setEditing(new Map())
-      const credential = await api.credentials.describe({ refs: [KEY_REF] })
-      if (credential.result.ok) {
-        const view = credential.result.value.credentials[KEY_REF]
-        setKeyConfigured(view?.configured)
-        setKeyLocked(view?.writable === false)
+      const drafts = toDrafts(section.value)
+      setInstances(drafts)
+      setPendingKeys(new Map())
+      const refs = drafts.map(draft => clientRefOf(draft.id))
+      if (refs.length > 0) {
+        const credential = await api.credentials.describe({ refs })
+        if (credential.result.ok) {
+          const view = new Map<string, CredentialView>()
+          for (const ref of refs) {
+            const entry = credential.result.value.credentials[ref]
+            view.set(ref, {
+              configured: entry?.configured,
+              locked: entry?.writable === false,
+            })
+          }
+          setCredentials(view)
+        }
+      } else {
+        setCredentials(new Map())
       }
       setStatus('ready')
     } catch (error) {
@@ -267,376 +205,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       setStatus('error')
     }
   }
-
-  // The section interrogates the settings plane once on mount: the page the
-  // slot renders must show the stored configuration, not an eternal ellipsis.
-  useEffect(() => { void load() }, [])
-
-  const saved = (text: string): void => {
-    setNotice(text)
-    void load()
-  }
-
-  /**
-   * Refuse the save with a localized message when a row cannot be written:
-   * an empty or duplicate id, or capacity text that does not parse. The host
-   * re-judges the same constraints at the write; this names the row first.
-   */
-  const catalogProblem = (): string | undefined => {
-    const seen = new Set<string>()
-    for (const [index, model] of models.entries()) {
-      const id = textOf(model, 'id').trim()
-      if (id.length === 0) return `${t('modelIdRequired')} (${t('models')} ${String(index + 1)})`
-      if (seen.has(id)) return `${t('modelIdDuplicate')} (${id})`
-      seen.add(id)
-      for (const field of ['contextWindow', 'maxTokens'] as const) {
-        const buffer = editing.get(bufferKey(index, field))
-        if (buffer !== undefined && Number.isNaN(parseCapacity(buffer) ?? 0)) {
-          return `${t('capacityInvalid')} (${id} · ${t(field)})`
-        }
-      }
-    }
-    return undefined
-  }
-
-  const save = async (): Promise<void> => {
-    const problem = catalogProblem()
-    if (problem !== undefined) {
-      setErrorText(problem)
-      return
-    }
-    setBusy(true)
-    setNotice(undefined)
-    setErrorText(undefined)
-    try {
-      const trimmedBase = baseURL.trim()
-      const ops: SettingsPathOpView[] = []
-      if (trimmedBase.length > 0) ops.push({ op: 'set', path: ['baseURL'], value: trimmedBase })
-      else ops.push({ op: 'unset', path: ['baseURL'] })
-      ops.push({
-        op: 'set',
-        path: ['proxy'],
-        value: { enabled: proxyEnabled, url: proxyUrl.trim().length > 0 ? proxyUrl.trim() : DEFAULT_PROXY_URL },
-      })
-      ops.push({
-        op: 'set',
-        path: ['models'],
-        value: models.map(model => {
-          const id = textOf(model, 'id').trim()
-          const name = textOf(model, 'name').trim()
-          const contextWindow = numberOf(model, 'contextWindow')
-          const maxTokens = numberOf(model, 'maxTokens')
-          const efforts = Array.isArray(model.reasoningEfforts)
-            ? model.reasoningEfforts.filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
-            : []
-          const preset = typeof model.defaultReasoningEffort === 'string'
-            && efforts.includes(model.defaultReasoningEffort)
-            ? model.defaultReasoningEffort
-            : undefined
-          return {
-            id,
-            ...name.length > 0 ? { name } : {},
-            ...contextWindow !== undefined ? { contextWindow } : {},
-            ...maxTokens !== undefined ? { maxTokens } : {},
-            ...efforts.length > 0 ? { reasoningEfforts: efforts } : {},
-            ...preset !== undefined ? { defaultReasoningEffort: preset } : {},
-          }
-        }),
-      })
-      const mutated = await api.settings.mutate({ ns: NS, ops, expectedRevision: revision })
-      if (!mutated.result.ok) {
-        setErrorText(mutated.result.error.message)
-        return
-      }
-      setRevision(mutated.result.value.revision)
-      const key = keyDraft.trim()
-      if (key.length > 0) {
-        const stored = await api.credentials.set({ ref: KEY_REF, value: key })
-        if (!stored.result.ok) {
-          setErrorText(stored.result.error.message)
-          return
-        }
-        setKeyDraft('')
-      }
-      saved(t('saved'))
-    } catch (error) {
-      setErrorText(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const fetchModels = async (): Promise<void> => {
-    setBusy(true)
-    setErrorText(undefined)
-    setCandidates(undefined)
-    try {
-      const key = keyDraft.trim()
-      const response = await api.llm.discoverModels({
-        settingsNs: NS,
-        provider: 'newapi',
-        ...baseURL.trim().length > 0 ? { baseURL: baseURL.trim() } : {},
-        ...key.length > 0 ? { apiKey: key } : {},
-      })
-      if (!response.result.ok) {
-        setErrorText(response.result.error.message)
-        return
-      }
-      const found = response.result.value.models
-      // Sorted by id regardless of what the host answered, so the picker and
-      // the rows it produces read the same way on every fetch.
-      found.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
-      if (found.length === 0) {
-        setErrorText(t('fetchEmpty'))
-        return
-      }
-      // Everything already configured starts unchecked, so adopting a
-      // selection never silently rewrites a capacity the user corrected.
-      const known = new Set(models.map(model => textOf(model, 'id')))
-      setCandidates(found)
-      setPicked(new Set(found.filter(model => !known.has(model.id)).map(model => model.id)))
-    } catch (error) {
-      setErrorText(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const adopt = (): void => {
-    if (candidates === undefined) return
-    const existing = new Map(models.map(model => [textOf(model, 'id'), model]))
-    for (const candidate of candidates) {
-      if (!picked.has(candidate.id)) continue
-      // A row the user already tuned wins over the gateway's own numbers.
-      if (existing.has(candidate.id)) continue
-      existing.set(candidate.id, {
-        id: candidate.id,
-        ...candidate.name === undefined ? {} : { name: candidate.name },
-        ...candidate.contextWindow === undefined ? {} : { contextWindow: candidate.contextWindow },
-        ...candidate.maxTokens === undefined ? {} : { maxTokens: candidate.maxTokens },
-      })
-    }
-    // The form keeps id order after an adoption: new and old rows merge
-    // into one alphabetized list instead of new rows appending at the end.
-    // Rows whose id is still empty are not yet models and stay at the bottom.
-    setModels([...existing.values()].sort((a, b) => {
-      const ai = textOf(a, 'id').trim()
-      const bi = textOf(b, 'id').trim()
-      if (ai.length === 0) return bi.length === 0 ? 0 : 1
-      if (bi.length === 0) return -1
-      return ai < bi ? -1 : ai > bi ? 1 : 0
-    }))
-    setCandidates(undefined)
-    setPicked(new Set())
-  }
-
-  const toggle = (id: string): void => {
-    setPicked(current => {
-      const next = new Set(current)
-      if (!next.delete(id)) next.add(id)
-      return next
-    })
-  }
-
-  /** Ask the host (via the RPC face) what models.dev knows about the rows. */
-  const updateParams = async (): Promise<void> => {
-    const ids = models.map(model => textOf(model, 'id').trim()).filter(id => id.length > 0)
-    if (ids.length === 0) {
-      setErrorText(t('paramsNoModels'))
-      return
-    }
-    setParamsBusy(true)
-    setErrorText(undefined)
-    setParams(undefined)
-    try {
-      const response = await props.fetchModelParams({
-        modelIds: ids,
-        ...proxyEnabled && proxyUrl.trim().length > 0 ? { proxyUrl: proxyUrl.trim() } : {},
-      })
-      if (!response.ok) {
-        setErrorText(response.error.message)
-        return
-      }
-      setParams(response.value)
-      setParamChoices(new Map())
-      // Completion feedback next to the action, not only in the panel the
-      // user may have to hunt for: matched/unmatched counts as a status line.
-      const matched = response.value.models.filter(entry => entry.matches.length > 0).length
-      setNotice(
-        t('paramsSummary')
-          .replace('{matched}', String(matched))
-          .replace('{unmatched}', String(response.value.models.length - matched)),
-      )
-    } catch (error) {
-      setErrorText(error instanceof Error ? error.message : String(error))
-    } finally {
-      setParamsBusy(false)
-    }
-  }
-
-  /** The match a panel row currently shows: the user's choice, else the first. */
-  const chosenMatch = (entry: { id: string; matches: ModelsDevParamsResponse['models'][number]['matches'] }) =>
-    entry.matches[paramChoices.get(entry.id) ?? 0] ?? entry.matches[0]
-
-  /**
-   * Apply the panel's chosen matches to the rows: overwrite mode replaces
-   * the capacities the catalog provides; blank mode only fills empty fields.
-   * Ids with no match keep their stored values.
-   * @param overwrite - whether existing values are replaced.
-   */
-  const applyParams = (overwrite: boolean): void => {
-    if (params === undefined) return
-    const byId = new Map(params.models.map(entry => [entry.id, entry]))
-    let touched = 0
-    const next = models.map(model => {
-      const id = textOf(model, 'id').trim()
-      const entry = byId.get(id)
-      const match = entry === undefined || entry.matches.length === 0 ? undefined : chosenMatch(entry)
-      if (match === undefined) return model
-      const nextContext = match.contextWindow
-      const nextMax = match.maxTokens
-      const nextEfforts = match.reasoningEfforts
-      const currentContext = numberOf(model, 'contextWindow')
-      const currentMax = numberOf(model, 'maxTokens')
-      const hasEfforts = Array.isArray(model.reasoningEfforts)
-      const takeContext = nextContext !== undefined && (overwrite || currentContext === undefined)
-      const takeMax = nextMax !== undefined && (overwrite || currentMax === undefined)
-      const takeEfforts = nextEfforts !== undefined && nextEfforts.length > 0 && (overwrite || !hasEfforts)
-      if (!takeContext && !takeMax && !takeEfforts) return model
-      touched += 1
-      return {
-        ...model,
-        ...takeContext && nextContext !== undefined ? { contextWindow: nextContext } : {},
-        ...takeMax && nextMax !== undefined ? { maxTokens: nextMax } : {},
-        ...takeEfforts && nextEfforts !== undefined ? { reasoningEfforts: nextEfforts } : {},
-      }
-    })
-    setModels(next)
-    setParams(undefined)
-    setParamChoices(new Map())
-    setNotice(`${t('paramsApplied')} (${String(touched)})`)
-  }
-
-  /** Replace one row, dropping optional fields the edit emptied. */
-  const patch = (index: number, next: Record<string, string | number | undefined>): void => {
-    setModels(current => current.map((model, at) => {
-      if (at !== index) return model
-      const cleared = new Set(
-        Object.entries(next).filter(([, value]) => value === undefined || value === '').map(([key]) => key),
-      )
-      return Object.fromEntries(
-        Object.entries({ ...model, ...next }).filter(([key]) => !cleared.has(key)),
-      )
-    }))
-  }
-
-  const toggleExpanded = (index: number): void => {
-    setExpanded(current => {
-      const next = new Set(current)
-      if (!next.delete(index)) next.add(index)
-      return next
-    })
-  }
-
-  /** What a capacity field shows: the buffer while typing, else the stored count. */
-  const capacityText = (model: ModelDraft, index: number, field: CapacityField): string =>
-    editing.get(bufferKey(index, field))
-      ?? (numberOf(model, field) === undefined ? '' : formatCapacity(numberOf(model, field) as number))
-
-  const editCapacity = (index: number, field: CapacityField, text: string): void => {
-    setEditing(current => new Map(current).set(bufferKey(index, field), text))
-    patch(index, { [field]: parseCapacity(text) })
-  }
-
-  /** Drop one row's entries and shift the rows after it down, in one pass. */
-  const reindexOnRemove = (current: ReadonlyMap<string, string>, index: number): Map<string, string> => {
-    const next = new Map<string, string>()
-    for (const [key, value] of current) {
-      const at = Number(key.slice(0, key.indexOf(':')))
-      if (at === index) continue
-      // Only the row number moves; the field half of the key is untouched.
-      next.set(at > index ? key.replace(/^\d+/, String(at - 1)) : key, value)
-    }
-    return next
-  }
-
-  const removeModel = (index: number): void => {
-    setModels(current => current.filter((_model, at) => at !== index))
-    // Both stores are keyed by position, so every row after this one shifts
-    // down and would otherwise inherit its neighbour's state.
-    setExpanded(current => {
-      const next = new Set<number>()
-      for (const at of current) {
-        if (at < index) next.add(at)
-        else if (at > index) next.add(at - 1)
-      }
-      return next
-    })
-    setEditing(current => reindexOnRemove(current, index))
-  }
-
-  /**
-   * Run the connectivity probe against the current drafts. Uses the form's
-   * one-shot key/base when present, falling back to the stored snapshot —
-   * testing persists nothing.
-   * @param overrides - freshly parsed facts (e.g. from an import) that have
-   *   not been committed to state yet; they beat the form values.
-   */
-  const runProbe = async (overrides?: { baseURL?: string; apiKey?: string }): Promise<void> => {
-    setProbeBusy(true)
-    setProbeResult(undefined)
-    try {
-      const base = (overrides?.baseURL ?? baseURL).trim()
-      const key = (overrides?.apiKey ?? keyDraft).trim()
-      const firstModel = models[0]
-      const chatModel = firstModel !== undefined && typeof firstModel.id === 'string' && firstModel.id.length > 0
-        ? firstModel.id
-        : undefined
-      const response = await props.probe({
-        ...base.length > 0 ? { baseURL: base } : {},
-        ...key.length > 0 ? { apiKey: key } : {},
-        ...probeWithChat && chatModel !== undefined ? { chatModel, chatTimeoutMs: 25_000 } : {},
-      })
-      if (!response.ok) {
-        setNotice(`${t('probeFailed')}: ${response.error.message}`)
-        return
-      }
-      setProbeResult(response.value)
-    } finally {
-      setProbeBusy(false)
-    }
-  }
-
-  /** Parse a pasted channel-connection descriptor, fill URL + key, then probe. */
-  const runImport = async (): Promise<void> => {
-    setImportBusy(true)
-    setImportError(undefined)
-    try {
-      let blob: unknown
-      try {
-        blob = JSON.parse(importText)
-      } catch {
-        setImportError(t('importInvalidJson'))
-        return
-      }
-      const response = await props.parseChannelConn(blob)
-      if (!response.ok) {
-        setImportError(response.error.message)
-        return
-      }
-      const value = response.value
-      setBaseURL(value.baseURL)
-      setKeyDraft(value.apiKey)
-      setImportOpen(false)
-      setImportText('')
-      setNotice(t('importApplied'))
-      // Auto-verify what was just filled; state updates are async, so pass
-      // the parsed facts directly instead of reading the new state.
-      void runProbe({ baseURL: value.baseURL, apiKey: value.apiKey })
-    } finally {
-      setImportBusy(false)
-    }
-  }
+  if (status === 'loading') void load()
 
   if (status === 'loading') return <section aria-label={t('nav')}><p>…</p></section>
   if (status === 'error') {
@@ -648,6 +217,84 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     )
   }
 
+  const patchInstance = (index: number, patch: Partial<InstanceDraft>): void => {
+    setInstances(current => current.map((draft, at) => at === index ? { ...draft, ...patch } : draft))
+  }
+
+  const removeInstance = (index: number): void => {
+    setInstances(current => current.filter((_, at) => at !== index))
+  }
+
+  const moveInstance = (index: number, direction: -1 | 1): void => {
+    setInstances(current => {
+      const next = [...current]
+      const target = index + direction
+      if (target < 0 || target >= next.length) return current
+      const [moved] = next.splice(index, 1)
+      if (moved === undefined) return current
+      next.splice(target, 0, moved)
+      return next
+    })
+  }
+
+  const handlePendingKey = (index: number, value: string): void => {
+    const ref = clientRefOf(instances[index]?.id ?? '')
+    setPendingKeys(current => {
+      const next = new Map(current)
+      if (value.trim().length === 0) next.delete(ref)
+      else next.set(ref, value)
+      return next
+    })
+  }
+
+  const instanceProblem = (): string | undefined => {
+    const seen = new Set<string>()
+    for (const [index, draft] of instances.entries()) {
+      const id = sanitizeClientId(draft.id)
+      if (draft.id.trim().length === 0) return `${t('instanceIdRequired')} (${t('instanceTitle')} ${String(index + 1)})`
+      if (seen.has(id)) return `${t('instanceIdDuplicate')} (${id})`
+      seen.add(id)
+    }
+    return undefined
+  }
+
+  const save = async (): Promise<void> => {
+    const problem = instanceProblem()
+    if (problem !== undefined) {
+      setErrorText(problem)
+      return
+    }
+    setBusy(true)
+    setNotice(undefined)
+    setErrorText(undefined)
+    try {
+      const ops: SettingsPathOpView[] = [{
+        op: 'set',
+        path: ['instances'],
+        value: instances.map(serializeInstance),
+      }]
+      const mutated = await api.settings.mutate({ ns: NS, ops, expectedRevision: revision })
+      if (!mutated.result.ok) {
+        setErrorText(mutated.result.error.message)
+        return
+      }
+      setRevision(mutated.result.value.revision)
+      for (const [ref, value] of pendingKeys) {
+        const stored = await api.credentials.set({ ref, value: value.trim() })
+        if (!stored.result.ok) {
+          setErrorText(stored.result.error.message)
+          return
+        }
+      }
+      setPendingKeys(new Map())
+      setNotice(t('saved'))
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <section aria-label={t('nav')}>
       <p>{t('intro')}</p>
@@ -655,349 +302,40 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       {!writable ? <p>{t('readOnly')}</p> : null}
       {errorText === undefined ? null : <p className="newapi-error">{errorText}</p>}
 
-      <div className="newapi-field">
-        <label htmlFor="newapi-key">{t('keyInput')}</label>
-        {/* The official ProviderEditor credential pattern: a read-only
-            credential (launch environment) locks the input and the
-            placeholder states the fact; no separate hint paragraph. */}
-        <input
-          id="newapi-key" type="password" autoComplete="off" className="newapi-input"
-          disabled={keyLocked}
-          placeholder={keyLocked
-            ? t('keyEnvLocked')
-            : keyConfigured === true ? t('keyStored') : keyConfigured === false ? t('keyMissing') : t('keyPlaceholder')}
-          value={keyDraft}
-          onChange={(event) => { setKeyDraft(event.target.value) }}
-        />
-      </div>
+      {instances.length === 0 ? <p className="newapi-empty">{t('noInstances')}</p> : null}
+      {instances.map((draft, index) => {
+        const ref = clientRefOf(draft.id)
+        const view = credentials.get(ref)
+        return (
+          <InstanceEditor
+            key={draft.id === '' ? index : `${draft.id}-${String(index)}`}
+            index={index}
+            total={instances.length}
+            draft={draft}
+            keyConfigured={view?.configured}
+            keyLocked={view?.locked ?? false}
+            api={api}
+            t={t}
+            fetchModelParams={fetchModelParams}
+            probe={probe}
+            parseChannelConn={parseChannelConn}
+            onPatch={(patch) => { patchInstance(index, patch) }}
+            onPendingKey={(value) => { handlePendingKey(index, value) }}
+            onRemove={() => { removeInstance(index) }}
+            onMove={(direction) => { moveInstance(index, direction) }}
+          />
+        )
+      })}
 
-      <div className="newapi-field">
-        <label htmlFor="newapi-base">{t('baseUrl')}</label>
-        <input
-          id="newapi-base" type="text" className="newapi-input" placeholder={t('baseUrlPlaceholder')}
-          value={baseURL}
-          onChange={(event) => { setBaseURL(event.target.value) }}
-        />
-        <p className="newapi-hint">{t('baseUrlHint')}</p>
-      </div>
-
-      <div className="newapi-field">
-        <div className="newapi-proberow">
-          <button
-            type="button" className="newapi-button newapi-button--primary"
-            disabled={probeBusy || !writable}
-            onClick={() => { void runProbe() }}
-          >
-            {probeBusy ? t('probing') : t('probe')}
-          </button>
-          <label className="newapi-probecheck">
-            <input
-              type="checkbox" checked={probeWithChat}
-              aria-label={t('probeWithChat')}
-              onChange={(event) => { setProbeWithChat(event.target.checked) }}
-            />
-            {t('probeWithChat')}
-          </label>
-          <button
-            type="button" className="newapi-linkbutton"
-            onClick={() => { setImportOpen(current => !current); setImportError(undefined) }}
-          >
-            {t('importChannelConn')}
-          </button>
-        </div>
-
-        {importOpen ? (
-          <div className="newapi-params" style={{ marginTop: 8 }}>
-            <label className="newapi-modelfield">
-              <span className="newapi-modelfield-label">{t('importHint')}</span>
-              <textarea
-                className="newapi-input" rows={3} spellCheck={false}
-                style={{ width: '100%', resize: 'vertical', fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12 }}
-                value={importText}
-                onChange={(event) => { setImportText(event.target.value); setImportError(undefined) }}
-              />
-            </label>
-            {importError === undefined ? null : <p className="newapi-error">{importError}</p>}
-            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <button
-                type="button" className="newapi-button newapi-button--primary"
-                disabled={importBusy || importText.trim().length === 0}
-                onClick={() => { void runImport() }}
-              >
-                {importBusy ? t('importBusy') : t('importApply')}
-              </button>
-              <button
-                type="button" className="newapi-button"
-                onClick={() => { setImportOpen(false); setImportText(''); setImportError(undefined) }}
-              >
-                {t('fetchCancel')}
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        {probeResult === undefined && !probeBusy ? null : (
-          <div className="newapi-probe" aria-live="polite">
-            {probeBusy ? (
-              <p className="newapi-hint">{t('probing')}</p>
-            ) : probeResult === undefined ? null : (
-              <>
-                <p>
-                  <span className={probeResult.reachable === true && probeResult.authValid === true ? 'newapi-probe-ok' : 'newapi-probe-bad'}>
-                    {probeResult.reachable === true
-                      ? probeResult.authValid === true ? t('probeReachableAuthed') : t('probeReachableUnauthed')
-                      : t('probeUnreachable')}
-                  </span>
-                  <span className="newapi-hint">
-                    {` · ${String(probeResult.latencyMs)}ms${probeResult.modelCount !== undefined ? ` · ${String(probeResult.modelCount)} ${t('models')}` : ''}${probeResult.status !== undefined ? ` · HTTP ${String(probeResult.status)}` : ''}`}
-                  </span>
-                </p>
-                {probeResult.chat === undefined ? null : (
-                  <p className={probeResult.chat.ok ? 'newapi-probe-ok' : 'newapi-error'}>
-                    {probeResult.chat.ok
-                      ? `${t('chatProbeOk')}: ${probeResult.chat.text ?? ''} · ${String(probeResult.chat.latencyMs)}ms`
-                      : `${t('chatProbeFail')}: ${probeResult.chat.error ?? ''} · ${String(probeResult.chat.latencyMs)}ms`}
-                  </p>
-                )}
-                {probeResult.error === undefined ? null : <p className="newapi-error">{probeResult.error}</p>}
-                {probeResult.sampleModels !== undefined && probeResult.sampleModels.length > 0 ? (
-                  <p className="newapi-hint" style={{ marginTop: 4 }}>{probeResult.sampleModels.slice(0, 5).join(', ')}</p>
-                ) : null}
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      <section className="newapi-catalog" aria-label={t('models')}>
-        <div className="newapi-catalog-head">
-          <span className="newapi-catalog-title">{t('models')}</span>
-          <div className="newapi-catalog-actions" style={{ display: 'flex', gap: 4 }}>
-            <button type="button" className="newapi-linkbutton" disabled={busy} onClick={() => { void fetchModels() }}>
-              {busy ? t('fetching') : t('fetchModels')}
-            </button>
-            <button type="button" className="newapi-linkbutton" disabled={paramsBusy} onClick={() => { void updateParams() }}>
-              {paramsBusy ? t('paramsFetching') : t('updateParams')}
-            </button>
-            {/* Same state semantics as the per-row delete glyph, applied to
-                every row at once: the merged position-keyed stores reset too,
-                so no stale disclosure or buffer survives into new rows. */}
-            <button type="button" className="newapi-linkbutton" disabled={busy || models.length === 0} onClick={() => {
-              setModels([])
-              setExpanded(new Set())
-              setEditing(new Map())
-              setParams(undefined)
-              setParamChoices(new Map())
-            }}>
-              {t('clearModels')}
-            </button>
-          </div>
-        </div>
-        <div className="newapi-proxyrow">
-          <label>
-            <input
-              type="checkbox" checked={proxyEnabled}
-              aria-label={t('proxyToggle')}
-              onChange={(event) => { setProxyEnabled(event.target.checked) }}
-            />
-            {t('proxyToggle')}
-          </label>
-          {proxyEnabled
-            ? (
-              <input
-                className="newapi-input" type="text" style={{ maxWidth: 220 }}
-                aria-label={t('proxyUrl')} placeholder={DEFAULT_PROXY_URL}
-                value={proxyUrl}
-                onChange={(event) => { setProxyUrl(event.target.value) }}
-              />
-            )
-            : null}
-        </div>
-        {models.length === 0 ? <p className="newapi-empty">{t('modelsEmpty')}</p> : null}
-        {models.map((model, index) => (
-          <div key={index} className="newapi-entry">
-            <div className="newapi-modelrow">
-              <input
-                className="newapi-input" type="text" value={textOf(model, 'id')}
-                placeholder={t('modelId')} aria-label={`${t('modelId')} ${String(index + 1)}`}
-                onChange={(event) => { patch(index, { id: event.target.value }) }}
-              />
-              <input
-                className="newapi-input" type="text" value={textOf(model, 'name')}
-                placeholder={t('modelName')} aria-label={`${t('modelName')} ${String(index + 1)}`}
-                onChange={(event) => { patch(index, { name: event.target.value === '' ? undefined : event.target.value }) }}
-              />
-              <button
-                type="button" className="newapi-iconbutton"
-                aria-label={`${t('modelAdvanced')} ${String(index + 1)}`}
-                aria-expanded={expanded.has(index)}
-                title={t('modelAdvanced')}
-                onClick={() => { toggleExpanded(index) }}
-              >
-                <IconChevron open={expanded.has(index)} />
-              </button>
-              <button
-                type="button" className="newapi-iconbutton newapi-iconbutton--danger"
-                aria-label={`${t('removeModel')} ${String(index + 1)}`}
-                title={t('removeModel')}
-                onClick={() => { removeModel(index) }}
-              >
-                <IconTrash />
-              </button>
-            </div>
-            {expanded.has(index)
-              ? (
-                <div className="newapi-modeladvanced">
-                  <label className="newapi-modelfield">
-                    <span className="newapi-modelfield-label">{t('contextWindow')}</span>
-                    <input
-                      className="newapi-input" type="text" inputMode="numeric"
-                      value={capacityText(model, index, 'contextWindow')}
-                      placeholder={CAPACITY_HINT.contextWindow}
-                      aria-label={`${t('contextWindow')} ${String(index + 1)}`}
-                      onChange={(event) => { editCapacity(index, 'contextWindow', event.target.value) }}
-                    />
-                  </label>
-                  <label className="newapi-modelfield">
-                    <span className="newapi-modelfield-label">{t('maxTokens')}</span>
-                    <input
-                      className="newapi-input" type="text" inputMode="numeric"
-                      value={capacityText(model, index, 'maxTokens')}
-                      placeholder={CAPACITY_HINT.maxTokens}
-                      aria-label={`${t('maxTokens')} ${String(index + 1)}`}
-                      onChange={(event) => { editCapacity(index, 'maxTokens', event.target.value) }}
-                    />
-                  </label>
-                  {Array.isArray(model.reasoningEfforts) && model.reasoningEfforts.length > 0
-                    ? (
-                      <label className="newapi-modelfield">
-                        <span className="newapi-modelfield-label">{t('modelReasoning')}</span>
-                        <select
-                          className="newapi-select"
-                          aria-label={`${t('defaultEffort')} ${String(index + 1)}`}
-                          value={typeof model.defaultReasoningEffort === 'string'
-                            && model.reasoningEfforts.includes(model.defaultReasoningEffort)
-                            ? model.defaultReasoningEffort
-                            : highestOf(model.reasoningEfforts)}
-                          onChange={(event) => {
-                            patch(index, { defaultReasoningEffort: event.target.value })
-                          }}
-                        >
-                          {model.reasoningEfforts.map((effort) => (
-                            <option key={effort} value={effort}>{effort}</option>
-                          ))}
-                        </select>
-                      </label>
-                    )
-                    : null}
-                </div>
-              )
-              : null}
-          </div>
-        ))}
+      <div className="newapi-instance-actions" style={{ marginTop: 8 }}>
         <button
           type="button" className="newapi-addmodel"
           disabled={busy}
-          onClick={() => { setModels(current => [...current, { id: '' }]) }}
+          onClick={() => { setInstances(current => [...current, blankDraft()]) }}
         >
-          {t('addModel')}
+          {t('addInstance')}
         </button>
-      </section>
-
-      {candidates === undefined ? null : (
-        <div className="newapi-candidates">
-          <strong>{t('fetchTitle')}</strong>
-          <ul>
-            {candidates.map(model => (
-              <li key={model.id}>
-                <label>
-                  <input
-                    type="checkbox" checked={picked.has(model.id)}
-                    onChange={() => { toggle(model.id) }}
-                  />
-                  {' '}
-                  {model.id}{model.name === undefined || model.name === model.id ? '' : ` (${model.name})`}
-                </label>
-              </li>
-            ))}
-          </ul>
-          <button type="button" className="newapi-button newapi-button--primary" disabled={picked.size === 0} onClick={adopt}>
-            {t('fetchAdopt')}
-          </button>
-          {' '}
-          <button type="button" className="newapi-button" onClick={() => { setCandidates(undefined); setPicked(new Set()) }}>
-            {t('fetchCancel')}
-          </button>
-        </div>
-      )}
-
-      {params === undefined ? null : (
-        <div className="newapi-params" ref={paramsRef}>
-          <strong>{t('paramsTitle')}</strong>
-          <p className="newapi-params-summary">{
-            t('paramsSummary')
-              .replace('{matched}', String(params.models.filter(entry => entry.matches.length > 0).length))
-              .replace('{unmatched}', String(params.models.filter(entry => entry.matches.length === 0).length))
-          }</p>
-          {params.models.map(entry => {
-            if (entry.matches.length === 0) {
-              return (
-                <div key={entry.id} className="newapi-params-row">
-                  <span className="newapi-params-id">{entry.id}</span>
-                  <span className="newapi-params-unmatched">{t('paramsUnmatched')}</span>
-                  <span />
-                </div>
-              )
-            }
-            if (entry.matches.length === 1) {
-              const match = entry.matches[0]
-              if (match === undefined) return null
-              return (
-                <div key={entry.id} className="newapi-params-row">
-                  <span className="newapi-params-id">{entry.id}</span>
-                  <span className="newapi-params-values">
-                    {`${match.official === true ? `${t('officialMark')} · ` : ''}${match.provider} · ${t('contextWindow')} ${match.contextWindow ?? '—'} / ${t('maxTokens')} ${match.maxTokens ?? '—'}${match.reasoningEfforts !== undefined && match.reasoningEfforts.length > 0 ? ` · ${t('modelReasoning')}: ${match.reasoningEfforts.join('/')}` : ''}`}
-                  </span>
-                  <span />
-                </div>
-              )
-            }
-            const chosen = paramChoices.get(entry.id) ?? 0
-            const match = entry.matches[chosen] ?? entry.matches[0]
-            if (match === undefined) return null
-            return (
-              <div key={entry.id} className="newapi-params-row">
-                <span className="newapi-params-id">{entry.id}</span>
-                <select
-                  className="newapi-select" aria-label={`${t('paramsProvider')} ${entry.id}`}
-                  value={String(chosen)}
-                  onChange={(event) => {
-                    setParamChoices(current => new Map(current).set(entry.id, Number(event.target.value)))
-                  }}
-                >
-                  {entry.matches.map((candidate, at) => (
-                    <option key={candidate.provider} value={String(at)}>
-                      {`${candidate.official === true ? `${t('officialMark')} · ` : ''}${candidate.provider}: ${t('contextWindow')} ${candidate.contextWindow ?? '—'} / ${t('maxTokens')} ${candidate.maxTokens ?? '—'}${candidate.reasoningEfforts !== undefined && candidate.reasoningEfforts.length > 0 ? ` · ${t('modelReasoning')}: ${candidate.reasoningEfforts.join('/')}` : ''}`}
-                    </option>
-                  ))}
-                </select>
-                <span className="newapi-params-values">{match.provider}</span>
-              </div>
-            )
-          })}
-          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-            <button type="button" className="newapi-button newapi-button--primary" onClick={() => { applyParams(true) }}>
-              {t('paramsOverwrite')}
-            </button>
-            <button type="button" className="newapi-button" onClick={() => { applyParams(false) }}>
-              {t('paramsFillBlank')}
-            </button>
-            <button type="button" className="newapi-button" onClick={() => { setParams(undefined); setParamChoices(new Map()) }}>
-              {t('fetchCancel')}
-            </button>
-          </div>
-        </div>
-      )}
+      </div>
 
       <p className="newapi-hint">{t('modelHint')}</p>
 
