@@ -6,7 +6,7 @@
  * A pre-0.9.0 flat section value (top-level `baseURL`/`models`/`proxy`)
  * loads as one `default` instance so nothing breaks on upgrade.
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-client-connection/client'
 import { DEFAULT_PROXY_URL, InstanceEditor, sanitizeClientId, clientRefOf } from './InstanceEditor.tsx'
@@ -205,8 +205,14 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       setStatus('error')
     }
   }
-  if (status === 'loading') void load()
-
+  // Load on mount only: invoking an async function during render would call
+  // setState before commit, which React 18 turns into an infinite update cycle
+  // (error #301). The slot renders nothing while the cycle runs, which is why
+  // the NewAPI section panel looked empty after v0.9.0.
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   if (status === 'loading') return <section aria-label={t('nav')}><p>…</p></section>
   if (status === 'error') {
     return (

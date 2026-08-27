@@ -90,3 +90,12 @@ registerChannelConnParser('mygw_token', (obj) => {
   - 回归：`test/multi-instance-smoke.mjs`（route/ref/迁移/多实例独立解析）、
     `test/migrate-smoke.mjs`（真实 settings.yaml 解析）。
   客户端类型在 `params-types.ts` 镜像 host `types.ts`（客户端 `rootDir: src/client` 不能跨目录 import）。
+- `0.9.1`：**hotfix：NewAPI 设置面板渲染崩（React #301）**。v0.9.0 把 `void load()`
+  写在了 `NewApiSection` 的 render body 里（`if (status === 'loading') void load()`），React 18
+  对 render 期间的 setState 触发无限更新循环 → 触发 "Maximum update depth exceeded" → dsh web
+  的 slot 错误边界用 `<div data-slot-error="settings.section">` 静默占位 → 用户看到空面板。
+  修复：把初始加载移进 `useEffect(() => { void load() }, [])`，render body 不再触发副作用。
+  验证：Edge 浏览器实测 reload + 进设置 → 点 NewAPI → 完整渲染"实例 1"卡片与全部字段。
+  诊断方法：reload 前装 `console.error` 钩 + error/unhandledrejection 监听 → 拿到
+  `Minified React error #301` + `slot entry crashed in 'settings.section'`；宿主无需重启，
+  client bundle 直接刷新。
