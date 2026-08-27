@@ -555,6 +555,8 @@ export function apply(ctx: Context, config: Config): void {
     handle: AdapterRegistrationHandle
     configurable: DirectoryRegistrationHandle
     policy: ResolvedRetryPolicy
+    /** Settings path of this instance inside the section (`['instances', i]`). */
+    path: readonly string[]
   }
   const registrations = new Map<string, Registration>()
   const syncRegistrations = (): void => {
@@ -566,9 +568,15 @@ export function apply(ctx: Context, config: Config): void {
       registration.handle()
       registrations.delete(id)
     }
-    for (const entry of entries) {
+    for (const [index, entry] of entries.entries()) {
       const existing = registrations.get(entry.id)
       const route = routeOf(entry.id)
+      // Address the instance INSIDE the section so the official Models page
+      // can resolve its own subtree (`schema.getPath(value, path)`): with an
+      // empty path it reads the section root's `apiKeyEnv` (absent), so the
+      // configured/missing dot never shows. Re-sync refreshes the path when
+      // instances are added/removed/reordered.
+      const path = ['instances', String(index)]
       if (existing === undefined) {
         const adapter = new NewApiAdapter({
           options: () => optionsFor(entry.id),
@@ -583,7 +591,7 @@ export function apply(ctx: Context, config: Config): void {
           provider: route,
           displayName: entry.displayName,
           settingsNs: NS,
-          settingsPath: [],
+          settingsPath: [...path],
           // The adapter knows this route only because configuration declared
           // it: a self-hosted gateway it ships nothing about.
           declared: true,
@@ -593,18 +601,36 @@ export function apply(ctx: Context, config: Config): void {
           handle: ctx.llm.registerAdapter([route], adapter),
           configurable,
           policy: optionsFor(entry.id).retryPolicy,
+          path,
         })
         continue
       }
       const policy = optionsFor(entry.id).retryPolicy
-      if (deepEqualJson(policy, existing.policy)) continue
+      const policyChanged = !deepEqualJson(policy, existing.policy)
+      const pathChanged = existing.path.length !== path.length
+        || existing.path.some((segment, at) => segment !== path[at])
+      if (!policyChanged && !pathChanged) continue
       // The registry captures the retry policy at registration, so it is the
       // one fact per-request resolution cannot refresh. `replace` re-reads it
       // in one synchronous registry section: disposing and re-registering
       // instead would publish an empty route set between the two, and an
       // observer that reacted to it would see this provider vanish.
-      existing.handle.replace([route])
-      existing.policy = policy
+      // Replacing the configurable entry at the same time refreshes the
+      // instance's settingsPath after a reorder.
+      if (policyChanged) {
+        existing.handle.replace([route])
+        existing.policy = policy
+      }
+      if (pathChanged) {
+        existing.configurable.replace([{
+          provider: route,
+          displayName: entry.displayName,
+          settingsNs: NS,
+          settingsPath: [...path],
+          declared: true,
+        }])
+        existing.path = path
+      }
     }
   }
   // Register whatever the composition already declares; the settings section
