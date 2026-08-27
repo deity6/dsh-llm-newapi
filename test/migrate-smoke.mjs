@@ -13,10 +13,14 @@ const raw = readFileSync('C:/Users/Deity/.dsh/settings.yaml', 'utf8')
 const doc = yaml.parse(raw)
 const section = Config(doc['llm-newapi'] ?? {})
 const entries = instanceEntriesOf(section)
-check('settings.yaml → 1 个实例', entries.length === 1, JSON.stringify(entries.map(e => e.id)))
-const seekai = entries[0]
-check('实例 id = seekai', seekai.id === 'seekai')
-check('displayName = seekai', seekai.displayName === 'seekai')
+check('settings.yaml → 2 个实例', entries.length === 2, JSON.stringify(entries.map(e => e.id)))
+const seekai = entries.find(e => e.id === 'seekai')
+check('实例 seekai 存在', seekai !== undefined)
+if (seekai === undefined) {
+  console.log(failures === 0 ? '\nALL PASS ✅' : `\n${failures} FAIL ❌`)
+  process.exit(1)
+}
+check('displayName = seekai', seekai.displayName === 'seekai', seekai.displayName)
 check('route = newapi-seekai', routeOf(seekai.id) === 'newapi-seekai', routeOf(seekai.id))
 check('ref = newapi_seekai', refOf(seekai.id) === 'newapi_seekai', refOf(seekai.id))
 const opts = resolveAdapterOptions(seekai.instance, undefined, refOf(seekai.id))
@@ -24,6 +28,13 @@ check('baseURL = https://seekai.cc/v1', opts.baseURL === 'https://seekai.cc/v1',
 check('proxyUrl 生效', opts.proxyUrl === 'http://127.0.0.1:7890', opts.proxyUrl)
 check('models 数量 = 8', opts.models.length === 8, String(opts.models.length))
 check('默认模型 glm-5-2 在列', opts.models.some(m => m.id === 'glm-5-2'))
+// justwoker 实例（用户后加）也独立解析
+const justwoker = entries.find(e => e.id === 'justwoker')
+check('实例 justwoker 存在', justwoker !== undefined, JSON.stringify(entries.map(e => e.id)))
+if (justwoker !== undefined) {
+  check('justwoker route = newapi-justwoker', routeOf(justwoker.id) === 'newapi-justwoker', routeOf(justwoker.id))
+  check('justwoker ref = newapi_justwoker', refOf(justwoker.id) === 'newapi_justwoker', refOf(justwoker.id))
+}
 
 // 旧扁平格式仍能迁移（回归）
 const legacy = Config({ baseURL: 'https://x/v1', models: [{ id: 'm1' }] })

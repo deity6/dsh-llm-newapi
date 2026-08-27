@@ -99,3 +99,15 @@ registerChannelConnParser('mygw_token', (obj) => {
   诊断方法：reload 前装 `console.error` 钩 + error/unhandledrejection 监听 → 拿到
   `Minified React error #301` + `slot entry crashed in 'settings.section'`；宿主无需重启，
   client bundle 直接刷新。
+- `0.9.2`：**修复模型选择器分组**。dsh 的模型目录把每个 provider 组
+  的标签取 `adapter.providerInfo().name`（dsh-host-apiproxy `buildModelCatalog`），
+  v0.9.0 多实例化时漏了这一步——`providerInfo` 仍硬编码 `name: 'NewAPI'`，
+  于是 seekai / justwoker 两个实例在选择器里都显示成 "NewAPI"。
+  修复：`NewApiAdapterOptions` 新增 `displayName`，adapter 构造时传入实例名，
+  `providerInfo()` 返回它（未传则回退路由 id）。选择器分组从此显示
+  "seekai" / "justwoker"。回归：`test/provider-name-smoke.mjs`（每实例
+  providerInfo 名 + 无 displayName 回退）；`test/migrate-smoke.mjs` 更新为
+  断言真实 settings.yaml 的 2 个实例（seekai + justwoker）。
+  与 dsh-reasoning-slider / dsh-model-picker 兼容：模型目录的
+  `reasoning.efforts`（id/name）由 `resolveModel` 从 catalog 的
+  reasoningEfforts 提供；提供商标签即上面修好的 displayName。

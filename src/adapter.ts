@@ -139,6 +139,12 @@ export interface NewApiAdapterOptions {
   /** Current validated connection facts; called once per operation. */
   options: () => NewApiConnectionOptions
   /**
+   * Human-readable provider name surfaced by {@link providerInfo} — the label
+   * the model picker shows for this instance's group. Defaults to the route
+   * id when omitted (the base class behaviour).
+   */
+  displayName?: string
+  /**
    * Resolve the bearer token for the connection facts of one request. The
    * snapshot is passed in — never re-read — so the key can only ever come
    * from the same resolution as the endpoint it is sent to. Throws `LlmError`
@@ -457,7 +463,12 @@ export class NewApiAdapter extends LlmAdapter {
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: 'NewAPI' }
+    // The picker's model directory labels each group with providerInfo().name
+    // (see dsh-host-apiproxy buildModelCatalog), so a multi-instance adapter
+    // must surface ITS instance's display name — a hardcoded name would make
+    // every instance's group read the same (v0.9.0 regression).
+    const displayName = this.config.displayName
+    return { id: provider, name: displayName && displayName.length > 0 ? displayName : provider }
   }
 
   override providerRetryPolicy(_provider: string): ResolvedRetryPolicy {

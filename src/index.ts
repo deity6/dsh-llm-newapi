@@ -496,6 +496,10 @@ export function apply(ctx: Context, config: Config): void {
           options: () => optionsFor(entry.id),
           resolveApiKey,
           officialProviderOf,
+          // providerInfo() returns this, and the model picker groups by it —
+          // per-instance so two gateways read as "seekai" / "justwoker", not
+          // both "NewAPI".
+          displayName: entry.displayName,
         })
         const configurable = ctx.llm.registerConfigurableProviders([{
           provider: route,
