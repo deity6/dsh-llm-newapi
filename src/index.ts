@@ -238,6 +238,45 @@ function proxyModeOf(raw: ProxyConfig | undefined): { mode: ProxyMode; url: stri
 }
 
 /**
+ * Normalize a raw proxy URL for undici: ensure an http(s) scheme, drop the
+ * path/query/trailing slash (undici tolerates them, but the ProxyAgent cache
+ * keys on the exact string, so normalizing keeps one agent per proxy).
+ */
+function normalizeProxyUrl(raw: string): string | undefined {
+  let value = raw.trim()
+  if (value.length === 0) return undefined
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) value = `http://${value}`
+  try {
+    const u = new URL(value)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return undefined
+    u.pathname = ''
+    u.search = ''
+    u.hash = ''
+    return u.href.replace(/\/$/, '')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Parse a raw WinINET `ProxyServer` registry value into an http(s) proxy URL.
+ * Clash's "系统代理" writes several shapes: `127.0.0.1:7890`,
+ * `http=127.0.0.1:7890;https=127.0.0.1:7890` (per-protocol), and a bypass
+ * list may be appended (`127.0.0.1:7890;localhost;*.example.com`). The first
+ * segment is the proxy spec; the `https=` entry wins for HTTPS traffic (the
+ * proxy itself is still an HTTP forward proxy — undici CONNECTs through it).
+ */
+function normalizeSystemProxyValue(raw: string): string | undefined {
+  const segments = raw.split(';').map(segment => segment.trim()).filter(segment => segment.length > 0)
+  if (segments.length === 0) return undefined
+  const httpsPair = segments.find(segment => /^https=/i.test(segment))
+  const chosen = httpsPair ?? segments[0] ?? ''
+  const host = chosen.replace(/^[a-z]+=/i, '')
+  if (host.length === 0) return undefined
+  return normalizeProxyUrl(host)
+}
+
+/**
  * Resolve the machine proxy: HTTP(S)_PROXY env first, then the Windows
  * WinINET system proxy (the registry row Clash's "系统代理" writes), so
  * `mode: 'system'` follows whatever the OS is using. Cached 30s because the
@@ -252,7 +291,7 @@ function systemProxyUrl(): string | undefined {
   }
   const envUrl = process.env.HTTPS_PROXY ?? process.env.https_proxy
     ?? process.env.HTTP_PROXY ?? process.env.http_proxy
-  let url = envUrl !== undefined && envUrl.trim().length > 0 ? envUrl.trim() : undefined
+  let url = envUrl !== undefined && envUrl.trim().length > 0 ? normalizeProxyUrl(envUrl) : undefined
   if (url === undefined && process.platform === 'win32') {
     try {
       const enable = execFileSync('reg', [
@@ -266,9 +305,7 @@ function systemProxyUrl(): string | undefined {
           '/v', 'ProxyServer',
         ], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
         const raw = /ProxyServer\s+REG_SZ\s+(\S+)/i.exec(server)?.[1]
-        if (raw !== undefined && raw.length > 0) {
-          url = /^[a-z]+:\/\//i.test(raw) ? raw : `http://${raw}`
-        }
+        if (raw !== undefined && raw.length > 0) url = normalizeSystemProxyValue(raw)
       }
     } catch {
       // No registry access (or reg missing): fall through to no proxy.
@@ -417,13 +454,11 @@ export function resolveAdapterOptions(
   if (proxy.mode === 'custom') {
     // Only judged while the custom mode is active: a stored custom URL that
     // is invalid must not fail the whole section when the mode is off.
-    try { new URL(proxy.url) } catch {
-      throw new Error(`${PKG}: proxy.url must be an absolute URL (got: ${proxy.url})`)
+    const normalized = normalizeProxyUrl(proxy.url)
+    if (normalized === undefined) {
+      throw new Error(`${PKG}: proxy.url must be an absolute http(s) URL (got: ${proxy.url})`)
     }
-    if (!/^https?:$/.test(new URL(proxy.url).protocol)) {
-      throw new Error(`${PKG}: proxy.url must be an http(s) URL (got: ${proxy.url})`)
-    }
-    proxyUrl = proxy.url
+    proxyUrl = normalized
   } else if (proxy.mode === 'system') {
     proxyUrl = systemProxyUrl()
   }

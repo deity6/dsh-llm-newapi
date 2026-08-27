@@ -573,6 +573,9 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
                   </span>
                   <span className="newapi-hint">
                     {` · ${String(probeResult.latencyMs)}ms${probeResult.modelCount !== undefined ? ` · ${String(probeResult.modelCount)} ${t('models')}` : ''}${probeResult.status !== undefined ? ` · HTTP ${String(probeResult.status)}` : ''}`}
+                    {probeResult.proxyUsed === undefined
+                      ? ` · ${t('proxyDirect')}`
+                      : ` · ${t('proxyVia')} ${probeResult.proxyUsed}`}
                   </span>
                 </p>
                 {probeResult.chat === undefined ? null : (

@@ -694,7 +694,13 @@ export class NewApiAdapter extends LlmAdapter {
     const latencyMs = Date.now() - started
     // We reached the server; classify by status, leaving authValid unset on
     // the ambiguous non-auth non-2xx cases (429, 500, …).
-    const result: ProbeResult = { ok: true, reachable: true, latencyMs, status: response.status }
+    const result: ProbeResult = {
+      ok: true,
+      reachable: true,
+      latencyMs,
+      status: response.status,
+      ...proxyUrl === undefined ? {} : { proxyUsed: proxyUrl },
+    }
     if (response.status === 401 || response.status === 403) {
       result.authValid = false
     } else if (response.ok) {

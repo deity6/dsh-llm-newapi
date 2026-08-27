@@ -13,7 +13,7 @@ const raw = readFileSync('C:/Users/Deity/.dsh/settings.yaml', 'utf8')
 const doc = yaml.parse(raw)
 const section = Config(doc['llm-newapi'] ?? {})
 const entries = instanceEntriesOf(section)
-check('settings.yaml → 2 个实例', entries.length === 2, JSON.stringify(entries.map(e => e.id)))
+check('settings.yaml → 3 个实例', entries.length === 3, JSON.stringify(entries.map(e => e.id)))
 const seekai = entries.find(e => e.id === 'seekai')
 check('实例 seekai 存在', seekai !== undefined)
 if (seekai === undefined) {
@@ -34,7 +34,9 @@ check('实例 justwoker 存在', justwoker !== undefined, JSON.stringify(entries
 if (justwoker !== undefined) {
   check('justwoker route = newapi-justwoker', routeOf(justwoker.id) === 'newapi-justwoker', routeOf(justwoker.id))
   check('justwoker ref = newapi_justwoker', refOf(justwoker.id) === 'newapi_justwoker', refOf(justwoker.id))
+  check('实例 agentrouter 存在', entries.some(e => e.id === 'agentrouter'), JSON.stringify(entries.map(e => e.id)))
 }
+
 
 // 旧扁平格式仍能迁移（回归）
 const legacy = Config({ baseURL: 'https://x/v1', models: [{ id: 'm1' }] })

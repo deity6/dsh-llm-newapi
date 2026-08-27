@@ -147,3 +147,14 @@ registerChannelConnParser('mygw_token', (obj) => {
   修复：激活态改按**位置索引** `activeIndex` 跟踪（id 可编辑、位置不变），渲染时
   clamp 到当前列表；tab 与编辑器 key 都改用位置（`tab-<i>` / `instance-<i>`），
   编辑 id 不再触发重挂载；删除/新增时索引显式维护。
+- `0.9.6`：**代理模式加固 + 探测可视化 + agentrouter 实例**。
+  - systemProxyUrl 加固：新增 `normalizeProxyUrl`（补 scheme、去 path/尾斜杠）与
+    `normalizeSystemProxyValue`（解析 Clash 的多种注册表格式：`host:port`、
+    `http=...;https=...` 按协议、`;` 后的旁路列表截断）；custom 模式同样走
+    normalize（不再手写 URL 校验）。
+  - 探测结果新增 `proxyUsed`：显示这次探测实际走了什么代理（`走代理
+    http://127.0.0.1:7890` 或 `直连`）——之前"跟随系统"到底生效没根本看不出来。
+  - settings.yaml 加 agentrouter 实例（baseURL https://agentrouter.org/v1、
+    apiKeyEnv newapi_agentrouter、proxy custom 7890、模型 gpt-5.6-sol）。
+  - 关键事实：agentrouter 直连超时、**必须走 Clash 代理才通**（实测 401 vs
+    Connect Timeout）；本机两个 key 均 401（需用户去 agentrouter 后台重新生成）。

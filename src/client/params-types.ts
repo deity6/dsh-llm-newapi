@@ -81,6 +81,8 @@ export interface ProbeResult {
   sampleModels?: string[]
   /** Round-trip latency in milliseconds for the `GET /models` call. */
   latencyMs: number
+  /** The forward proxy the probe routed through, when any; absent = direct. */
+  proxyUsed?: string
   /** Present when the caller requested a chat probe (`chatModel`). */
   chat?: ChatProbeResult
   /** Present when the caller requested a tool-call probe (`toolCallModel`). */

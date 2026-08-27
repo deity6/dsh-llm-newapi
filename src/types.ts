@@ -252,6 +252,12 @@ export interface ProbeResult {
   /** Round-trip latency in milliseconds for the `GET /models` call. */
   latencyMs: number
   /**
+   * The forward proxy this probe actually routed through, when any: the
+   * request's `proxyUrl` override, or the instance snapshot's resolved proxy
+   * (custom URL, or the system proxy for `mode: 'system'`). Absent = direct.
+   */
+  proxyUsed?: string
+  /**
    * Minimal-cost chat completion check, present only when the caller named a
    * `chatModel`. Billed a handful of tokens at most (max_tokens 5).
    */
