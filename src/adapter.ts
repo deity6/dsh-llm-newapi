@@ -129,6 +129,14 @@ export interface NewApiConnectionOptions {
    * while the proxy setting is enabled, so its absence means a direct fetch.
    */
   proxyUrl?: string
+  /**
+   * Custom request headers this instance injects into every gateway request
+   * (chat completions, model discovery, probes). Spread BEFORE the mandatory
+   * headers so `authorization` / `content-type` / `accept` / the product
+   * `User-Agent` always win — a user header can never break auth or the wire
+   * contract, only add to it.
+   */
+  headers?: Record<string, string>
   /** Match-shaping hints for the models.dev params lookup. */
   providerHints: ProviderHints
   /** Provider-owned model-request retry policy, already resolved. */
@@ -450,7 +458,42 @@ function gatewayFetch(
   proxyUrl: string | undefined,
 ): Promise<Response> {
   if (proxyUrl === undefined || proxyUrl.length === 0) return fetch(url, init)
-  return undiciFetch(url, { ...init, dispatcher: proxyAgentFor(proxyUrl) })
+  // undici's own RequestInit/Response types are structurally narrower than
+  // the DOM/global ones the rest of the adapter compiles against (stricter
+  // BodyInit, a ReadableStream without the DOM async-iterator members). The
+  // runtime object is identical, so the boundary is typed through undici's
+  // own parameter/result types and asserted back to the global Response.
+  return undiciFetch(url, {
+    ...init,
+    dispatcher: proxyAgentFor(proxyUrl),
+  } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>
+}
+
+/**
+ * Compose the headers for one gateway request: the instance's custom headers
+ * first, the mandatory ones last so they always win. Custom headers can ADD
+ * to the wire contract (a vendor `X-*` auth, an `HTTP-Referer` bot-protection
+ * pass) but can never override `authorization`, `content-type`, `accept`, or
+ * the product `User-Agent` — those are spread after the custom block.
+ * @param custom - the instance's injected headers (or a probe override).
+ * @param authorization - the resolved bearer token for this request.
+ * @param contentType - the request `content-type` (json, or the SSE accept for streaming).
+ * @param accept - the response `accept` mime.
+ * @returns the composed header record.
+ */
+function gatewayHeaders(
+  custom: Record<string, string> | undefined,
+  authorization: string,
+  contentType: string,
+  accept: string,
+): Record<string, string> {
+  return {
+    ...custom ?? {},
+    authorization: `Bearer ${authorization}`,
+    'content-type': contentType,
+    accept,
+    ...attributionHeaders(),
+  }
 }
 
 /**
@@ -568,11 +611,7 @@ export class NewApiAdapter extends LlmAdapter {
     try {
       response = await gatewayFetch(`${base}/models`, {
         method: 'GET',
-        headers: {
-          'authorization': `Bearer ${apiKey}`,
-          'accept': 'application/json',
-          ...attributionHeaders(),
-        },
+        headers: gatewayHeaders(connection.headers, apiKey, 'application/json', 'application/json'),
         ...request.signal === undefined ? {} : { signal: request.signal },
       }, connection.proxyUrl)
     } catch (error: unknown) {
@@ -667,18 +706,19 @@ export class NewApiAdapter extends LlmAdapter {
     }
     let response: Response
     // An instance with its own forward proxy probes truthfully: the request
-    // override beats the snapshot's proxy.
+    // override beats the snapshot's proxy. Custom headers too: a draft's
+    // unsaved headers override the stored ones so the probe reflects what the
+    // user is about to save.
     const proxyUrl = request.proxyUrl !== undefined && request.proxyUrl.length > 0
       ? request.proxyUrl
       : connection.proxyUrl
+    const headers = request.headers !== undefined && Object.keys(request.headers).length > 0
+      ? request.headers
+      : connection.headers
     try {
       response = await gatewayFetch(`${base}/models`, {
         method: 'GET',
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          accept: 'application/json',
-          ...attributionHeaders(),
-        },
+        headers: gatewayHeaders(headers, apiKey, 'application/json', 'application/json'),
         ...request.signal === undefined ? {} : { signal: request.signal },
       }, proxyUrl)
     } catch (error: unknown) {
@@ -725,13 +765,13 @@ export class NewApiAdapter extends LlmAdapter {
     // succeeded (a rejected key would waste the request) and only when the
     // caller named a chat model. Billed a handful of tokens at most.
     if (result.authValid === true && request.chatModel !== undefined) {
-      result.chat = await this.probeChat(base, apiKey, proxyUrl, request)
+      result.chat = await this.probeChat(base, apiKey, proxyUrl, headers, request)
     }
     // Optional minimal-cost tool-call probe: verifies the gateway's
     // function-calling path end to end (some gateways answer /models and text
     // chat yet strip `tools`). Runs under the same auth gate.
     if (result.authValid === true && request.toolCallModel !== undefined) {
-      result.toolCall = await this.probeToolCall(base, apiKey, proxyUrl, request)
+      result.toolCall = await this.probeToolCall(base, apiKey, proxyUrl, headers, request)
     }
     return result
   }
@@ -751,6 +791,7 @@ export class NewApiAdapter extends LlmAdapter {
     base: string,
     apiKey: string,
     proxyUrl: string | undefined,
+    headers: Record<string, string> | undefined,
     request: ProbeRequest,
   ): Promise<ChatProbeResult> {
     const chatStarted = Date.now()
@@ -762,12 +803,7 @@ export class NewApiAdapter extends LlmAdapter {
     try {
       const response = await gatewayFetch(`${base}/chat/completions`, {
         method: 'POST',
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          'content-type': 'application/json',
-          accept: 'application/json',
-          ...attributionHeaders(),
-        },
+        headers: gatewayHeaders(headers, apiKey, 'application/json', 'application/json'),
         body: JSON.stringify({
           model: request.chatModel,
           messages: [{ role: 'user', content: 'Reply with exactly: ok' }],
@@ -842,6 +878,7 @@ export class NewApiAdapter extends LlmAdapter {
     base: string,
     apiKey: string,
     proxyUrl: string | undefined,
+    headers: Record<string, string> | undefined,
     request: ProbeRequest,
   ): Promise<ToolCallProbeResult> {
     const started = Date.now()
@@ -853,12 +890,7 @@ export class NewApiAdapter extends LlmAdapter {
     try {
       const response = await gatewayFetch(`${base}/chat/completions`, {
         method: 'POST',
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          'content-type': 'application/json',
-          accept: 'application/json',
-          ...attributionHeaders(),
-        },
+        headers: gatewayHeaders(headers, apiKey, 'application/json', 'application/json'),
         body: JSON.stringify({
           model: request.toolCallModel,
           messages: [{
@@ -1094,14 +1126,7 @@ export class NewApiAdapter extends LlmAdapter {
     // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)
-    const headers = {
-      'authorization': `Bearer ${apiKey}`,
-      'content-type': 'application/json',
-      'accept': 'text/event-stream',
-      // The mandatory product attribution; nothing per-request or per-user
-      // rides on a third-party gateway request.
-      ...attributionHeaders(),
-    }
+    const headers = gatewayHeaders(connection.headers, apiKey, 'application/json', 'text/event-stream')
 
     let response: Response
     try {

@@ -348,4 +348,10 @@ export interface ProbeRequest {
    * truthfully.
    */
   proxyUrl?: string
+  /**
+   * Custom request headers to inject into the probe (mirrors the instance
+   * `headers` config). Lets a draft's unsaved headers override the stored
+   * ones so the probe reflects what the user is about to save.
+   */
+  headers?: Record<string, string>
 }

@@ -107,10 +107,14 @@ export interface ProbeRequest {
   toolCallTimeoutMs?: number
   /** Forward proxy for the probe requests; overrides the snapshot's proxy. */
   proxyUrl?: string
+  /** Custom request headers to inject into the probe (mirrors the instance config). */
+  headers?: Record<string, string>
 }
 
 /** Connection facts parsed from a channel-connection descriptor. */
 export interface ParsedChannelConn {
+  /** Always `true` — discriminates from the host's error envelope. */
+  ok: true
   /** Normalized gateway base with the `/v1` prefix. */
   baseURL: string
   /** The API key to store under the `newapi` credentials reference. */

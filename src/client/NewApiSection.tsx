@@ -9,8 +9,8 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-client-connection/client'
-import { DEFAULT_PROXY_URL, InstanceEditor, sanitizeClientId, clientRefOf } from './InstanceEditor.tsx'
-import type { InstanceDraft, ModelDraft } from './InstanceEditor.tsx'
+import { DEFAULT_PROXY_URL, InstanceEditor, sanitizeClientId, clientRefOf, headersToList, headersToRecord } from './InstanceEditor.tsx'
+import type { InstanceDraft, InstanceProxyMode, ModelDraft } from './InstanceEditor.tsx'
 import type { NewApiKey } from './locale.ts'
 import type {
   ModelsDevParamsRequest,
@@ -92,6 +92,7 @@ function toDrafts(source: unknown): InstanceDraft[] {
       : [],
     proxyMode: proxy.mode,
     proxyUrl: proxy.url,
+    headers: [],
   }]
 }
 
@@ -106,6 +107,7 @@ function draftOf(entry: Record<string, unknown>): InstanceDraft {
       : [],
     proxyMode: proxy.mode,
     proxyUrl: proxy.url,
+    headers: headersToList(entry.headers as Record<string, unknown> | undefined),
   }
 }
 
@@ -117,6 +119,7 @@ function blankDraft(): InstanceDraft {
     models: [],
     proxyMode: 'system',
     proxyUrl: DEFAULT_PROXY_URL,
+    headers: [],
   }
 }
 
@@ -159,6 +162,7 @@ function serializeInstance(draft: InstanceDraft): Record<string, unknown> {
         ? { url: draft.proxyUrl.trim() }
         : {},
     },
+    ...draft.headers.length > 0 ? { headers: headersToRecord(draft.headers) } : {},
   }
 }
 
@@ -214,7 +218,9 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
           for (const ref of refs) {
             const entry = credential.result.value.credentials[ref]
             view.set(ref, {
-              configured: entry?.configured,
+              // Omit `configured` rather than pass an explicit undefined —
+              // the props are optional under exactOptionalPropertyTypes.
+              ...entry?.configured === undefined ? {} : { configured: entry.configured },
               locked: entry?.writable === false,
             })
           }
@@ -289,6 +295,18 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       if (draft.id.trim().length === 0) return `${t('instanceIdRequired')} (${t('instanceTitle')} ${String(index + 1)})`
       if (seen.has(id)) return `${t('instanceIdDuplicate')} (${id})`
       seen.add(id)
+      // A model row must carry an id, and no two rows may share one: an
+      // id-less row would serialize to a catalog entry the adapter rejects
+      // at resolve time, so the save is refused here instead.
+      const modelIds = new Set<string>()
+      for (const [modelIndex, model] of draft.models.entries()) {
+        const modelId = textOf(model, 'id').trim()
+        if (modelId.length === 0) {
+          return `${t('modelIdRequired')} (${t('models')} ${String(index + 1)} · ${String(modelIndex + 1)})`
+        }
+        if (modelIds.has(modelId)) return `${t('modelIdDuplicate')} (${modelId})`
+        modelIds.add(modelId)
+      }
     }
     return undefined
   }
@@ -336,6 +354,9 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     ? -1
     : Math.min(Math.max(activeIndex, 0), instances.length - 1)
   const activeDraft = safeActiveIndex >= 0 ? instances[safeActiveIndex] : undefined
+  const activeCredential = activeDraft === undefined
+    ? undefined
+    : credentials.get(clientRefOf(activeDraft.id))
 
   return (
     <section aria-label={t('nav')}>
@@ -383,8 +404,12 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
           key={`instance-${String(safeActiveIndex)}`}
           index={safeActiveIndex}
           draft={activeDraft}
-          keyConfigured={credentials.get(clientRefOf(activeDraft.id))?.configured}
-          keyLocked={credentials.get(clientRefOf(activeDraft.id))?.locked ?? false}
+          {...activeCredential === undefined
+            ? { keyLocked: false }
+            : {
+              ...activeCredential.configured === undefined ? {} : { keyConfigured: activeCredential.configured },
+              keyLocked: activeCredential.locked,
+            }}
           api={api}
           t={t}
           fetchModelParams={fetchModelParams}

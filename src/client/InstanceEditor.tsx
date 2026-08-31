@@ -26,6 +26,12 @@ export type ModelDraft = Record<string, unknown>
 /** How one instance's gateway traffic reaches the network (mirrors host). */
 export type InstanceProxyMode = 'system' | 'direct' | 'custom'
 
+/** One custom request header as the editor holds it: a name/value pair. */
+export interface HeaderPair {
+  name: string
+  value: string
+}
+
 /** The persistent per-instance facts the parent persists and the card edits. */
 export interface InstanceDraft {
   /** Sanitized route suffix (`newapi-<id>` / `newapi_<id>`). */
@@ -37,6 +43,13 @@ export interface InstanceDraft {
   models: ModelDraft[]
   proxyMode: InstanceProxyMode
   proxyUrl: string
+  /**
+   * Custom HTTP request headers injected into every gateway request this
+   * instance makes. The editor holds them as name/value pairs (a name/value
+   * object is awkward to edit in React); the parent converts to/from the
+   * stored `Record<string, string>` on load and save.
+   */
+  headers: HeaderPair[]
 }
 
 /** Sanitized instance id, mirroring the host's `sanitizeInstanceId`. */
@@ -74,6 +87,28 @@ function numberOf(model: ModelDraft, key: string): number | undefined {
 
 /** The two token counts edited as K/M-suffixed text behind a row's disclosure. */
 type CapacityField = 'contextWindow' | 'maxTokens'
+
+/** Convert the stored header record into editable name/value pairs. */
+export function headersToList(record: Record<string, unknown> | undefined): HeaderPair[] {
+  if (record === undefined || typeof record !== 'object' || Array.isArray(record)) return []
+  const pairs: HeaderPair[] = []
+  for (const [name, value] of Object.entries(record)) {
+    if (typeof name !== 'string' || name.length === 0) continue
+    pairs.push({ name, value: typeof value === 'string' ? value : '' })
+  }
+  return pairs
+}
+
+/** Convert editable pairs into a stored header record, dropping empty names. */
+export function headersToRecord(pairs: readonly HeaderPair[]): Record<string, string> {
+  const record: Record<string, string> = {}
+  for (const pair of pairs) {
+    const name = pair.name.trim()
+    if (name.length === 0) continue
+    record[name] = pair.value
+  }
+  return record
+}
 
 /** Accepted capacity spellings: a decimal count with an optional K/M suffix. */
 const CAPACITY_PATTERN = /^(\d+(?:\.\d+)?)([km])?$/i
@@ -396,6 +431,10 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
         // The explicit URL only applies to the custom mode; `system`/`direct`
         // resolve host-side from the instance snapshot.
         ...draft.proxyMode === 'custom' && draft.proxyUrl.trim().length > 0 ? { proxyUrl: draft.proxyUrl.trim() } : {},
+        // Draft headers override the stored ones so the probe reflects the
+        // unsaved header edits (host falls back to the instance snapshot
+        // when none are supplied here).
+        ...draft.headers.length > 0 ? { headers: headersToRecord(draft.headers) } : {},
         ...probeWithChat && chatModel !== undefined ? { chatModel, chatTimeoutMs: 25_000 } : {},
         ...probeWithTool && chatModel !== undefined ? { toolCallModel: chatModel, toolCallTimeoutMs: 30_000 } : {},
       })
@@ -602,6 +641,50 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
         )}
       </div>
 
+      <section className="newapi-headers" aria-label={`${t('customHeaders')} ${String(index + 1)}`}>
+        <div className="newapi-catalog-head">
+          <span className="newapi-catalog-title">{t('customHeaders')}</span>
+          <div className="newapi-catalog-actions" style={{ display: 'flex', gap: 4 }}>
+            <button type="button" className="newapi-linkbutton" onClick={() => {
+              patch({ headers: [...draft.headers, { name: '', value: '' }] })
+            }}>
+              {t('addHeader')}
+            </button>
+          </div>
+        </div>
+        <p className="newapi-hint">{t('headerHint')}</p>
+        {draft.headers.length === 0 ? <p className="newapi-empty">{t('headersEmpty')}</p> : draft.headers.map((header, headerIndex) => (
+          <div key={headerIndex} className="newapi-headerrow">
+            <input
+              className="newapi-input" type="text" placeholder={t('headerName')}
+              aria-label={`${t('headerName')} ${String(headerIndex + 1)}`}
+              value={header.name}
+              onChange={(event) => {
+                const next = draft.headers.map((h, at) => at === headerIndex ? { ...h, name: event.target.value } : h)
+                patch({ headers: next })
+              }}
+            />
+            <input
+              className="newapi-input" type="text" placeholder={t('headerValue')}
+              aria-label={`${t('headerValue')} ${String(headerIndex + 1)}`}
+              value={header.value}
+              onChange={(event) => {
+                const next = draft.headers.map((h, at) => at === headerIndex ? { ...h, value: event.target.value } : h)
+                patch({ headers: next })
+              }}
+            />
+            <button
+              type="button" className="newapi-iconbutton newapi-iconbutton--danger"
+              aria-label={`${t('removeHeader')} ${String(headerIndex + 1)}`}
+              title={t('removeHeader')}
+              onClick={() => { patch({ headers: draft.headers.filter((_, at) => at !== headerIndex) }) }}
+            >
+              <IconTrash />
+            </button>
+          </div>
+        ))}
+      </section>
+
       <section className="newapi-catalog" aria-label={`${t('models')} ${String(index + 1)}`}>
         <div className="newapi-catalog-head">
           <span className="newapi-catalog-title">{t('models')}</span>
@@ -687,6 +770,7 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
                   <span className="newapi-modelfield-label">{t('contextWindow')}</span>
                   <input
                     className="newapi-input" type="text" placeholder={CAPACITY_HINT.contextWindow}
+                    aria-label={`${t('contextWindow')} ${String(modelIndex + 1)}`}
                     value={editing.get(bufferKey(modelIndex, 'contextWindow'))
                       ?? (numberOf(model, 'contextWindow') === undefined ? '' : formatCapacity(numberOf(model, 'contextWindow')!))}
                     onChange={(event) => {
@@ -700,6 +784,7 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
                   <span className="newapi-modelfield-label">{t('maxTokens')}</span>
                   <input
                     className="newapi-input" type="text" placeholder={CAPACITY_HINT.maxTokens}
+                    aria-label={`${t('maxTokens')} ${String(modelIndex + 1)}`}
                     value={editing.get(bufferKey(modelIndex, 'maxTokens'))
                       ?? (numberOf(model, 'maxTokens') === undefined ? '' : formatCapacity(numberOf(model, 'maxTokens')!))}
                     onChange={(event) => {

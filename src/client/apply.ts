@@ -195,6 +195,18 @@ const SECTION_CSS = `
   gap: 8px; margin-bottom: 12px;
 }
 .newapi-proxyrow label { display: inline-flex; align-items: center; gap: 6px; color: var(--dsw-alias-label-primary); }
+/* Custom request header editor: one name + value + remove row. */
+.newapi-headers {
+  display: flex; flex-direction: column; gap: 8px;
+  padding-top: 12px; margin-bottom: 12px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+.newapi-headerrow {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr) auto;
+  align-items: center;
+  gap: 6px;
+}
 .newapi-select {
   box-sizing: border-box; padding: 6px 10px; border-radius: 8px;
   border: 1px solid var(--dsw-alias-border-l2);

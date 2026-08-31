@@ -15,7 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { assertUsableApiKey, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
-import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
+import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, ResolvedRetryPolicy, RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
@@ -100,6 +100,16 @@ export function refOf(id: string): CredentialRef {
 }
 
 /**
+ * The credential reference one instance's key resolves through: its stored
+ * `apiKeyEnv` when it names one (the settings UI writes `newapi_<id>` there so
+ * the official Models page can join the key), else the derived `newapi_<id>`.
+ */
+export function refForEntry(instance: NewApiInstanceConfig): CredentialRef {
+  const named = instance.apiKeyEnv?.trim()
+  return named !== undefined && named.length > 0 ? credentialRef(named) : refOf(instance.id)
+}
+
+/**
  * One configurable NewAPI gateway instance. The settings namespace holds a
  * LIST of these; each registers its own provider route `newapi-<id>` and
  * credential reference `newapi_<id>`, so several gateways can be configured
@@ -141,6 +151,18 @@ export interface NewApiInstanceConfig {
   providerHints?: ProviderHints
   /** Provider-owned model-request retry policy. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Custom HTTP request headers injected into every gateway request this
+   * instance makes (chat completions, model discovery, probes). Lets a gateway
+   * that requires extra headers — `HTTP-Referer` / `X-Title` (OpenRouter-style),
+   * a vendor `X-*` auth, or a `Origin` bot-protection pass — be served without
+   * forking the adapter. Security-critical headers (`authorization`,
+   * `content-type`, `accept`, and the product `User-Agent`) are applied AFTER
+   * these and always win, so a stored header can never break auth or the wire
+   * contract; an invalid name (not an RFC 7230 token) or a CRLF-bearing value
+   * is rejected at resolve time.
+   */
+  headers?: Record<string, string>
 }
 
 /**
@@ -185,6 +207,12 @@ export interface Config {
   providerHints?: ProviderHints
   /** Provider-owned model-request retry policy; omission uses normal defaults. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Custom request headers injected into every gateway request, same shape as
+   * the per-instance field. Legacy flat configs fold into the `default`
+   * instance and carry this block along.
+   */
+  headers?: Record<string, string>
 }
 
 /** How an instance's gateway traffic reaches the network. */
@@ -219,7 +247,22 @@ const catalogModel: z<NewApiCatalogModel> = z.object({
 /** Default forward proxy: the conventional Clash port on loopback. */
 export const DEFAULT_PROXY_URL = 'http://127.0.0.1:7890'
 
-const proxySchema: z<ProxyConfig> = z.object({
+/**
+ * RFC 7230 field-name token: the characters a header name may be. A stored
+ * custom header whose name does not match is rejected at resolve time so a
+ * typo cannot reach the wire as a malformed fetch header.
+ */
+const HEADER_NAME_PATTERN = /^[A-Za-z0-9!#$%&'*+\-.^`|~]+$/
+
+/** Reject header values that embed CR/LF — they smuggle extra header lines. */
+function isValidHeaderValue(value: string): boolean {
+  return !/[\r\n]/.test(value)
+}
+
+// The schema's inferred field types (`mode: string`) are wider than the
+// narrowed `ProxyMode` union, so the annotation is asserted — the runtime
+// validation is exact either way; only the static type narrows.
+const proxySchema = z.object({
   // No `.default` on mode: a pre-0.9.4 `{ enabled, url }` block must reach
   // `proxyModeOf` with `mode` absent so the legacy `enabled` flag migrates.
   // The whole-block default below covers a completely absent proxy.
@@ -227,7 +270,7 @@ const proxySchema: z<ProxyConfig> = z.object({
   url: z.string().default(DEFAULT_PROXY_URL),
   // Legacy: pre-0.9.4 sections used `enabled`; keep accepting it.
   enabled: z.boolean(),
-}).default({ mode: 'system', url: DEFAULT_PROXY_URL })
+}).default({ mode: 'system', url: DEFAULT_PROXY_URL, enabled: false }) as unknown as z<ProxyConfig>
 
 /** Migrate a legacy `{ enabled, url }` proxy block onto the mode shape. */
 function proxyModeOf(raw: ProxyConfig | undefined): { mode: ProxyMode; url: string } {
@@ -332,6 +375,7 @@ const instanceSchema: z<NewApiInstanceConfig> = z.object({
     models: z.object({}),
   }),
   retryPolicy: RetryPolicySchema,
+  headers: z.dict(z.string()).default({}),
 })
 
 export const Config: z<Config> = z.object({
@@ -348,6 +392,7 @@ export const Config: z<Config> = z.object({
     models: z.object({}),
   }),
   retryPolicy: RetryPolicySchema,
+  headers: z.dict(z.string()).default({}),
 })
 
 /**
@@ -449,6 +494,22 @@ export function resolveAdapterOptions(
     )
   }
   const defaultContextWindow = config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW
+  // Custom headers: validate every name/value, drop empty names, trim both
+  // sides. Done here (not in the schema) so an invalid entry keeps the last
+  // good facts rather than failing the whole section, and so the mandatory
+  // security headers stay authoritative regardless of what is stored.
+  const headers: Record<string, string> = {}
+  for (const [rawName, rawValue] of Object.entries(config.headers ?? {})) {
+    const name = rawName.trim()
+    if (name.length === 0) continue
+    if (!HEADER_NAME_PATTERN.test(name)) {
+      throw new Error(`${PKG}: custom header "${rawName}" is not a valid HTTP header name`)
+    }
+    if (typeof rawValue !== 'string' || !isValidHeaderValue(rawValue)) {
+      throw new Error(`${PKG}: custom header "${name}" has an invalid value (no CR/LF allowed)`)
+    }
+    headers[name] = rawValue.trim()
+  }
   const proxy = proxyModeOf(config.proxy)
   let proxyUrl: string | undefined
   if (proxy.mode === 'custom') {
@@ -470,6 +531,7 @@ export function resolveAdapterOptions(
     defaultContextWindow,
     streamIdleTimeoutMs,
     ...proxyUrl === undefined ? {} : { proxyUrl },
+    ...Object.keys(headers).length > 0 ? { headers } : {},
     providerHints: {
       defaults: { ...config.providerHints?.defaults },
       models: { ...config.providerHints?.models },
@@ -518,7 +580,7 @@ export function apply(ctx: Context, config: Config): void {
     states.set(id, state)
     if (raw === state.lastRaw && state.lastGood !== undefined) return state.lastGood
     try {
-      const next = resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), entry.instance.apiKeyEnv?.trim() || refOf(id))
+      const next = resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refForEntry(entry.instance))
       state.lastRaw = raw
       state.lastGood = next
       return next
@@ -531,7 +593,7 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
   // Validate the initial composition (fail loud on a bad static config).
-  for (const entry of entryList()) resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), entry.instance.apiKeyEnv?.trim() || refOf(entry.id))
+  for (const entry of entryList()) resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refForEntry(entry.instance))
 
   const resolveApiKey = async (connection: ResolvedNewApiOptions): Promise<string> => {
     // Every credential fact comes from the caller's snapshot, so a rejected
@@ -610,8 +672,13 @@ export function apply(ctx: Context, config: Config): void {
       // can resolve its own subtree (`schema.getPath(value, path)`): with an
       // empty path it reads the section root's `apiKeyEnv` (absent), so the
       // configured/missing dot never shows. Re-sync refreshes the path when
-      // instances are added/removed/reordered.
-      const path = ['instances', String(index)]
+      // instances are added/removed/reordered. A legacy FLAT section (the
+      // fold into `default`) has no `instances` array — its facts sit at the
+      // section root, so the path is empty there.
+      const section = current()
+      const flatLegacy = (section.instances === undefined || section.instances.length === 0)
+        && (section.baseURL !== undefined || (section.models?.length ?? 0) > 0)
+      const path = flatLegacy ? [] : ['instances', String(index)]
       if (existing === undefined) {
         const adapter = new NewApiAdapter({
           options: () => optionsFor(entry.id),
@@ -780,7 +847,7 @@ export function apply(ctx: Context, config: Config): void {
     // silently keeps the last good facts at every request.
     validate: (value) => {
       for (const entry of instanceEntriesOf(value)) {
-        resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), entry.instance.apiKeyEnv?.trim() || refOf(entry.id))
+        resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refForEntry(entry.instance))
       }
     },
     setSource: (source) => {

@@ -221,3 +221,129 @@ export interface ModelsDevParamsResponse {
         matches: ModelsDevMatch[];
     }>;
 }
+/**
+ * A connectivity/auth probe of one gateway endpoint. The web section (and any
+ * importer of a channel-conn descriptor) calls this to confirm a pasted
+ * endpoint actually serves models before saving it. The probe deliberately
+ * uses `GET /v1/models` — not a chat completion — because some newapi-based
+ * deployments put their chat endpoint behind bot protection (e.g. Cloudflare
+ * Turnstile) that blocks scripted inference while still answering the models
+ * listing, so a models-based probe reports a usable "reachable + auth OK"
+ * signal the chat endpoint would falsely fail.
+ */
+export interface ProbeResult {
+    /** True when the probe completed with a usable outcome (see `error`). */
+    ok: boolean;
+    /** False when DNS/TLS/connection failed before any HTTP response arrived. */
+    reachable: boolean;
+    /** False on 401/403; `undefined` when no HTTP response arrived. */
+    authValid?: boolean;
+    /** HTTP status when a response arrived. */
+    status?: number;
+    /** Number of models the gateway advertises via `GET /models`. */
+    modelCount?: number;
+    /** A few advertised model ids, for a quick human sanity check. */
+    sampleModels?: string[];
+    /** Round-trip latency in milliseconds for the `GET /models` call. */
+    latencyMs: number;
+    /**
+     * The forward proxy this probe actually routed through, when any: the
+     * request's `proxyUrl` override, or the instance snapshot's resolved proxy
+     * (custom URL, or the system proxy for `mode: 'system'`). Absent = direct.
+     */
+    proxyUsed?: string;
+    /**
+     * Minimal-cost chat completion check, present only when the caller named a
+     * `chatModel`. Billed a handful of tokens at most (max_tokens 5).
+     */
+    chat?: ChatProbeResult;
+    /**
+     * Minimal-cost tool-call check, present only when the caller named a
+     * `toolCallModel`. Verifies the gateway's function-calling path.
+     */
+    toolCall?: ToolCallProbeResult;
+    /** Human-readable failure reason when `ok` is false. */
+    error?: string;
+}
+/**
+ * One minimal chat-completion probe (`POST /chat/completions` with a
+ * "Reply with exactly: ok" prompt and `max_tokens: 5`). The goal is the
+ * cheapest possible end-to-end check that the gateway actually completes a
+ * conversation turn, not a meaningful model eval — so every field is
+ * deliberately small.
+ */
+export interface ChatProbeResult {
+    /** True when the gateway returned a 2xx completion. */
+    ok: boolean;
+    /** HTTP status, when a response arrived. */
+    status?: number;
+    /** Round-trip latency in milliseconds for the chat completion. */
+    latencyMs: number;
+    /** First completion text (expected to be roughly "ok"). */
+    text?: string;
+    /** Wire finish reason, when the completion reported one. */
+    finishReason?: string;
+    /** Human-readable failure reason when `ok` is false. */
+    error?: string;
+}
+/**
+ * One minimal tool-call probe (`POST /chat/completions` with a `ping` tool
+ * declared and a prompt asking the model to call it). Verifies the gateway
+ * end-to-end exercises the function-calling path — discovery and text chat
+ * can be healthy while tool calls still fail (missing `tools` passthrough,
+ * a gateway that strips tool schemas, an upstream that refuses). Also a
+ * near-zero-cost check: `max_tokens` caps the reply.
+ */
+export interface ToolCallProbeResult {
+    /** True when the gateway returned a `tool_calls[].function.name === 'ping'`. */
+    ok: boolean;
+    /** HTTP status, when a response arrived. */
+    status?: number;
+    /** Round-trip latency in milliseconds for the tool-call completion. */
+    latencyMs: number;
+    /** The tool name the model actually called (expected `ping`). */
+    toolName?: string;
+    /** Human-readable failure reason when `ok` is false. */
+    error?: string;
+}
+/**
+ * Request payload of the `probe` RPC endpoint. Mirrors the discovery draft:
+ * a base and a one-shot credential override the current connection snapshot,
+ * so a user can probe a pasted endpoint before committing the key.
+ */
+export interface ProbeRequest {
+    /** Gateway base overriding the snapshot; normalized like `baseURL` config. */
+    baseURL?: string;
+    /** One-shot API key overriding the stored credential (never persisted). */
+    apiKey?: string;
+    /** Caller cancellation. */
+    signal?: AbortSignal;
+    /**
+     * When set, also run a minimal-cost chat completion probe against this
+     * model id ("Reply with exactly: ok", `max_tokens: 5`). Absent, the probe
+     * stays free (models listing only).
+     */
+    chatModel?: string;
+    /** Time bound for the chat probe, milliseconds (default 20_000). */
+    chatTimeoutMs?: number;
+    /**
+     * When set, also run a minimal tool-call completion probe against this
+     * model id (a `ping` function with the model asked to call it). Absent,
+     * no tool-call check runs.
+     */
+    toolCallModel?: string;
+    /** Time bound for the tool-call probe, milliseconds (default 30_000). */
+    toolCallTimeoutMs?: number;
+    /**
+     * Forward proxy to route both probe requests through; overrides the
+     * instance snapshot's proxy so an instance with its own proxy probes
+     * truthfully.
+     */
+    proxyUrl?: string;
+    /**
+     * Custom request headers to inject into the probe (mirrors the instance
+     * `headers` config). Lets a draft's unsaved headers override the stored
+     * ones so the probe reflects what the user is about to save.
+     */
+    headers?: Record<string, string>;
+}

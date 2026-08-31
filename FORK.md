@@ -158,3 +158,21 @@ registerChannelConnParser('mygw_token', (obj) => {
     apiKeyEnv newapi_agentrouter、proxy custom 7890、模型 gpt-5.6-sol）。
   - 关键事实：agentrouter 直连超时、**必须走 Clash 代理才通**（实测 401 vs
     Connect Timeout）；本机两个 key 均 401（需用户去 agentrouter 后台重新生成）。
+- `0.9.7`：**自定义请求头注入（每实例）**。
+  - 实例配置新增 `headers?: Record<string, string>`：注入到该实例对网关的
+    **全部**请求——chat completions 流、`/models` 模型发现、连接/chat/工具调用
+    探测。适用场景：OpenRouter 系要 `HTTP-Referer`/`X-Title`、某些网关要自定义
+    `X-*` 鉴权头、或被 Cloudflare 系 bot 防护按 `Origin` 放行的站点。
+  - **安全语义**：自定义头先展开、强制头（`authorization`/`content-type`/
+    `accept`/产品 `User-Agent`）后展开——自定义头**只能追加、不能覆盖**，
+    存错也搞不坏鉴权与线协议。`resolveAdapterOptions` 校验头名必须符合
+    RFC 7230 token、值不得含 CR/LF，非法项沿用 last-good 配置而不是整段失效。
+  - **探测如实反映草稿**：`ProbeRequest` 新增 `headers?`，设置页把未保存的
+    请求头草稿一并传入探测（host 端在没有 override 时回退实例快照），
+    与 proxyUrl 的草稿 override 行为一致。
+  - **UI**：实例卡新增「自定义请求头」区块（名称 + 值 + 删除行、添加按钮、
+    空态与提示文案），序列化时丢弃空名、空列表不落盘；`z.dict(z.string())`
+    schema 保证任意键合法往返。
+  - models.dev 目录下载（第三方主机）刻意**不**注入自定义头。
+  - 回归：migrate-smoke 增补 headers 解析断言；build:host + build:client +
+    typecheck 全绿。

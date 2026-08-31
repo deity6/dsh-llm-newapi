@@ -11,7 +11,7 @@
  * @module dsh-llm-newapi/sse
  */
 
-import { EventSourceParserStream } from 'eventsource-parser/stream'
+import { createParser } from 'eventsource-parser'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 
 /** The terminal payload the gateway (and OpenAI) sends after the last chunk. */
@@ -29,12 +29,48 @@ export async function* parseSse(
   stream: ReadableStream<BufferSource>,
   onComment?: (comment: string) => void,
 ): AsyncGenerator<string> {
-  const events = stream
-    .pipeThrough(new TextDecoderStream())
-    .pipeThrough(new EventSourceParserStream({ onComment }))
-  for await (const { data } of events) {
-    yield data
-    if (data === DONE) return
+  // Driven by a manual reader loop rather than `pipeThrough`: the web-stream
+  // type supplied by the caller (undici's, from the fetch response body) and
+  // the global `ReadableStream` disagree on `[Symbol.asyncIterator]` across
+  // lib.dom and node:stream/web typings, so the pipe chain does not
+  // type-check; the reader loop needs only `getReader()`, which both declare.
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  const queue: string[] = []
+  const parser = createParser({
+    onComment,
+    onEvent: (event) => { queue.push(event.data) },
+  })
+  try {
+    // Pull until EOF, feeding each chunk through the parser; an event whose
+    // data equals the sentinel terminates the stream at that point.
+    for (;;) {
+      while (queue.length > 0) {
+        const data = queue.shift() as string
+        yield data
+        if (data === DONE) return
+      }
+      const { done, value } = await reader.read()
+      if (done) break
+      parser.feed(decoder.decode(value, { stream: true }))
+    }
+    // Final flush: the trailing (unterminated-at-EOF or blank-line-terminated)
+    // tail. The sentinel here is the successful completion of a truncation-free
+    // stream; its absence means EOF hit before `[DONE]` — a cut-off response.
+    parser.feed(decoder.decode())
+    while (queue.length > 0) {
+      const data = queue.shift() as string
+      yield data
+      if (data === DONE) return
+    }
+    throw new LlmError('SSE stream ended without [DONE]', 'STREAM_CLOSED')
+  } finally {
+    // An early return (sentinel reached mid-stream) must cancel the source
+    // like the previous pipe chain did; a finished/errored stream ignores it.
+    try {
+      await reader.cancel()
+    } catch {
+      // The stream already closed or errored; nothing to cancel.
+    }
   }
-  throw new LlmError('SSE stream ended without [DONE]', 'STREAM_CLOSED')
 }

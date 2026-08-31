@@ -10,9 +10,9 @@
  * @module dsh-llm-newapi/adapter
  */
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
-import type { GenerateOptions, LlmDiscoveredModel, LlmModelDiscoveryRequest, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, LlmDiscoveredModel, LlmModelDiscoveryRequest, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, PreparedAdapterCall, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials';
-import type { ModelsDevApi, ModelsDevMatch, ModelsDevParamsRequest, ModelsDevParamsResponse, ProviderHints, WireError } from './types.js';
+import type { ModelsDevApi, ModelsDevMatch, ModelsDevParamsRequest, ModelsDevParamsResponse, ProbeRequest, ProbeResult, ProviderHints, WireError } from './types.js';
 /** Prefix for adapter-raised diagnostics. */
 export declare const PKG = "llm-newapi";
 /**
@@ -80,10 +80,19 @@ export interface NewApiConnectionOptions {
     /** Maximum provider idle time while one stream read is outstanding. */
     streamIdleTimeoutMs: number;
     /**
-     * Forward proxy for the models.dev catalog download; present only while
-     * the proxy setting is enabled, so its absence means a direct fetch.
+     * Forward proxy covering every gateway request — chat completions, model
+     * discovery, probes, and the models.dev catalog download; present only
+     * while the proxy setting is enabled, so its absence means a direct fetch.
      */
     proxyUrl?: string;
+    /**
+     * Custom request headers this instance injects into every gateway request
+     * (chat completions, model discovery, probes). Spread BEFORE the mandatory
+     * headers so `authorization` / `content-type` / `accept` / the product
+     * `User-Agent` always win — a user header can never break auth or the wire
+     * contract, only add to it.
+     */
+    headers?: Record<string, string>;
     /** Match-shaping hints for the models.dev params lookup. */
     providerHints: ProviderHints;
     /** Provider-owned model-request retry policy, already resolved. */
@@ -93,6 +102,12 @@ export interface NewApiConnectionOptions {
 export interface NewApiAdapterOptions {
     /** Current validated connection facts; called once per operation. */
     options: () => NewApiConnectionOptions;
+    /**
+     * Human-readable provider name surfaced by {@link providerInfo} — the label
+     * the model picker shows for this instance's group. Defaults to the route
+     * id when omitted (the base class behaviour).
+     */
+    displayName?: string;
     /**
      * Resolve the bearer token for the connection facts of one request. The
      * snapshot is passed in — never re-read — so the key can only ever come
@@ -186,6 +201,18 @@ export declare class NewApiAdapter extends LlmAdapter {
     providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(_provider: string): ResolvedRetryPolicy;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
+    /**
+     * Bind exact model metadata and the eventual request dispatch to one adapter
+     * generation. The harness `ctx.llm.prepareCall()` delegates here; older
+     * `@deepseek-ai/dsh-llm` base classes (pre-0.1.x) omit this method, so we
+     * implement it explicitly to stay compatible across dsh-llm versions.
+     *
+     * @param provider - registered provider route.
+     * @param model - exact model id.
+     * @param signal - cancellation for model resolution.
+     * @returns model metadata and a one-generation stream entry point.
+     */
+    prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;
     resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
     /**
      * Interrogate one gateway endpoint for the models it advertises, serving
@@ -197,6 +224,49 @@ export declare class NewApiAdapter extends LlmAdapter {
      *   with context/maxTokens facts from the configured catalog when ids match.
      */
     discoverModels(request: LlmModelDiscoveryRequest): Promise<readonly LlmDiscoveredModel[]>;
+    /**
+     * Connectivity + auth probe of one gateway endpoint. The web section (and
+     * any importer of a channel-connection descriptor) calls this to confirm a
+     * pasted endpoint actually serves models before saving it. The base probe
+     * uses `GET /v1/models` — not a chat completion — because some newapi-based
+     * deployments put their chat endpoint behind bot protection (e.g. Cloudflare
+     * Turnstile) that blocks scripted inference while still answering the models
+     * listing, so a models-based probe reports a usable "reachable + auth OK"
+     * signal the chat endpoint would falsely fail. When the caller names a
+     * `chatModel`, an OPTIONAL minimal-cost chat completion probe
+     * ("Reply with exactly: ok", max_tokens 5) also runs — see
+     * {@link probeChat}. A draft supplies its own base and one-shot credential;
+     * otherwise both come from the current snapshot.
+     * @param request - the probe draft (base, one-shot key, optional chat probe, cancellation).
+     * @returns a structured {@link ProbeResult} — never throws.
+     */
+    probeConnection(request: ProbeRequest): Promise<ProbeResult>;
+    /**
+     * One minimal chat-completion probe: `POST /chat/completions` asking the
+     * model to reply "ok" with `max_tokens: 5`, bounded by the caller's
+     * `chatTimeoutMs` (default 20s). Never throws; every failure is returned
+     * as a structured {@link ChatProbeResult}.
+     * @param base - normalized gateway base (chat path appended here).
+     * @param apiKey - the resolved probe credential.
+     * @param proxyUrl - the effective forward proxy (request override or snapshot).
+     * @param request - the probe draft (chat model, timeout, cancellation).
+     * @returns the chat outcome — never throws.
+     */
+    private probeChat;
+    /**
+     * One minimal tool-call probe: `POST /chat/completions` declaring a `ping`
+     * function and asking the model to call it, bounded by `toolCallTimeoutMs`
+     * (default 30s). Never throws; every failure is returned as a structured
+     * {@link ToolCallProbeResult}. Success means the gateway's function-calling
+     * path answered with a real `tool_calls` entry — the failure mode that a
+     * plain text chat probe cannot see.
+     * @param base - normalized gateway base (chat path appended here).
+     * @param apiKey - the resolved probe credential.
+     * @param proxyUrl - the effective forward proxy (request override or snapshot).
+     * @param request - the probe draft (tool model, timeout, cancellation).
+     * @returns the tool-call outcome — never throws.
+     */
+    private probeToolCall;
     /**
      * Download the models.dev catalog (optionally through the configured
      * forward proxy) and match every requested gateway id against it, serving

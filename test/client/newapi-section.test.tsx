@@ -40,7 +40,7 @@ function wireFace(overrides: Partial<{
     },
     credentials: {
       describe: vi.fn(() => Promise.resolve({
-        result: { ok: true, value: overrides.credentialsAnswer ?? { credentials: { newapi: { configured: true, writable: true } } } },
+        result: { ok: true, value: overrides.credentialsAnswer ?? { credentials: { newapi_default: { configured: true, writable: true } } } },
       })),
       set: vi.fn(() => Promise.resolve({ result: { ok: true, value: undefined } })),
     },
@@ -63,6 +63,18 @@ function paramsFace() {
       ],
     },
   }))
+}
+
+/** The instances op of the first mutate call (the whole section saves as one op). */
+function savedSection(api: ReturnType<typeof wireFace>): Array<Record<string, unknown>> {
+  return api.settings.mutate.mock.calls[0][0].ops
+    .find((op: { path: string[] }) => op.path[0] === 'instances').value
+}
+
+/** The models array of the first instance in the saved section. */
+function savedModels(api: ReturnType<typeof wireFace>): Array<Record<string, unknown>> {
+  const models = savedSection(api)[0].models
+  return Array.isArray(models) ? models as Array<Record<string, unknown>> : []
 }
 
 describe('NewApiSection mount', () => {
@@ -93,7 +105,7 @@ describe('NewApiSection mount', () => {
 
 describe('environment-supplied credential (read-only)', () => {
   const envCredential = {
-    credentials: { newapi: { configured: true, writable: false, source: 'env' } },
+    credentials: { newapi_default: { configured: true, writable: false, source: 'env' } },
   }
 
   it('locks the key field with the launch-environment placeholder', async () => {
@@ -146,15 +158,10 @@ describe('models.dev params update', () => {
     await waitFor(() => { expect(screen.getByText(t('updateParams'))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('updateParams')))
     await waitFor(() => { expect(screen.getByText(t('paramsTitle'))).toBeTruthy() })
-    // Completion feedback: a status line names the matched/unmatched counts
-    // right away, instead of only the panel below a possibly long list.
-    expect(screen.getByRole('status').textContent).toBe(
-      t('paramsSummary').replace('{matched}', '2').replace('{unmatched}', '1'),
-    )
-    // The counts appear twice by design: the status line and the panel summary.
-    expect(screen.getAllByText((_, element) =>
-      element?.textContent === t('paramsSummary').replace('{matched}', '2').replace('{unmatched}', '1'),
-    )).toHaveLength(2)
+    // Completion feedback: the panel summary names the matched/unmatched
+    // counts right away.
+    const summary = t('paramsSummary').replace('{matched}', '2').replace('{unmatched}', '1')
+    expect(screen.getByText(summary)).toBeTruthy()
     expect(screen.getByText(t('paramsUnmatched'))).toBeTruthy()
     // The ambiguous id offers a provider picker with both entries.
     const picker = screen.getByLabelText(`${t('paramsProvider')} qwen/qwen-max`) as HTMLSelectElement
@@ -166,8 +173,7 @@ describe('models.dev params update', () => {
     await waitFor(() => { expect(screen.getByText(new RegExp(t('paramsApplied')))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
-    const models = api.settings.mutate.mock.calls[0][0].ops
-      .find((op: { path: string[] }) => op.path[0] === 'models').value
+    const models = savedModels(api)
     expect(models[0]).toEqual({ id: 'deepseek-chat', contextWindow: 128_000, maxTokens: 8_192, reasoningEfforts: ['low', 'medium', 'high'] })
     expect(models[1]).toEqual({ id: 'qwen/qwen-max', contextWindow: 262_144, maxTokens: 32_768 })
     expect(models[2]).toEqual({ id: 'mystery-model' })
@@ -186,23 +192,26 @@ describe('models.dev params update', () => {
     await waitFor(() => { expect(screen.getByText(new RegExp(t('paramsApplied')))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
-    const models = api.settings.mutate.mock.calls[0][0].ops
-      .find((op: { path: string[] }) => op.path[0] === 'models').value
-    expect(models[0]).toEqual({ id: 'deepseek-chat', contextWindow: 65_536, maxTokens: 8_192, reasoningEfforts: ['low', 'medium', 'high'] })
+    expect(savedModels(api)[0]).toEqual({ id: 'deepseek-chat', contextWindow: 65_536, maxTokens: 8_192, reasoningEfforts: ['low', 'medium', 'high'] })
   })
 
-  it('sends the proxy url only while the toggle is on, and persists the proxy section', async () => {
+  it('sends the proxy url only in custom mode, and persists the proxy section', async () => {
     const api = wireFace()
     const fetchModelParams = paramsFace()
     render(<NewApiSection api={api as never} t={t} fetchModelParams={fetchModelParams as never} />)
 
-    await waitFor(() => { expect(screen.getByLabelText(t('proxyToggle'))).toBeTruthy() })
+    // The legacy fixture has no proxy block, so the draft lands in direct
+    // mode: params lookups carry no proxyUrl.
+    await waitFor(() => { expect(screen.getByLabelText(t('proxyMode'))).toBeTruthy() })
+    expect((screen.getByLabelText(t('proxyMode')) as HTMLSelectElement).value).toBe('direct')
     fireEvent.click(screen.getByText(t('updateParams')))
     await waitFor(() => { expect(fetchModelParams).toHaveBeenCalledTimes(1) })
     expect(fetchModelParams.mock.calls[0][0].proxyUrl).toBeUndefined()
 
-    fireEvent.click(screen.getByLabelText(t('proxyToggle')))
-    fireEvent.change(screen.getByLabelText(t('proxyUrl')), { target: { value: 'http://127.0.0.1:7897' } })
+    // Custom mode reveals the URL box; the lookups then route through it.
+    fireEvent.change(screen.getByLabelText(t('proxyMode')), { target: { value: 'custom' } })
+    const urlBox = await waitFor(() => screen.getByLabelText(t('proxyUrl')))
+    fireEvent.change(urlBox, { target: { value: 'http://127.0.0.1:7897' } })
     fireEvent.click(screen.getByText(t('updateParams')))
     await waitFor(() => { expect(fetchModelParams).toHaveBeenCalledTimes(2) })
     expect(fetchModelParams.mock.calls[1][0].proxyUrl).toBe('http://127.0.0.1:7897')
@@ -210,9 +219,8 @@ describe('models.dev params update', () => {
     fireEvent.click(screen.getByText(t('fetchCancel')))
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
-    const proxy = api.settings.mutate.mock.calls[0][0].ops
-      .find((op: { path: string[] }) => op.path[0] === 'proxy').value
-    expect(proxy).toEqual({ enabled: true, url: 'http://127.0.0.1:7897' })
+    const proxy = savedSection(api)[0].proxy as Record<string, unknown>
+    expect(proxy).toEqual({ mode: 'custom', url: 'http://127.0.0.1:7897' })
   })
 })
 
@@ -243,12 +251,6 @@ describe('model catalog', () => {
     expect((screen.getByLabelText(`${t('modelId')} 2`) as HTMLInputElement).value).toBe('deepseek-chat')
     expect((screen.getByLabelText(`${t('modelId')} 3`) as HTMLInputElement).value).toBe('zhipu/glm-5.3')
   })
-
-  /** The models op of the first mutate call. */
-  function savedModels(api: ReturnType<typeof wireFace>): Array<Record<string, unknown>> {
-    return api.settings.mutate.mock.calls[0][0].ops
-      .find((op: { path: string[] }) => op.path[0] === 'models').value
-  }
 
   it('folds capacities behind the row disclosure and adopts K/M entry', async () => {
     const api = wireFace()
@@ -297,9 +299,7 @@ describe('model catalog', () => {
     // answers the old fixture after reload — irrelevant to the written ops).
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
-    const models = api.settings.mutate.mock.calls[0][0].ops
-      .find((op: { path: string[] }) => op.path[0] === 'models').value
-    expect(models).toEqual([])
+    expect(savedModels(api)).toEqual([])
   })
 
   it('adds a row through the add-model action and refuses a save with an empty id', async () => {

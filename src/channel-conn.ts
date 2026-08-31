@@ -20,6 +20,8 @@ import { normalizeBaseUrl } from './adapter.ts'
 
 /** Connection facts a parsed channel connection yields. */
 export interface ParsedChannelConn {
+  /** Always `true` for a successful parse — discriminates from the error arm. */
+  ok: true
   /** Normalized gateway base with the `/v1` prefix (`/models` appends to it). */
   baseURL: string
   /** The API key to store under the `newapi` credentials reference. */
@@ -104,5 +106,5 @@ registerChannelConnParser('newapi_channel_conn', (obj) => {
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }
-  return { baseURL, apiKey: key, sourceType: 'newapi_channel_conn' }
+  return { ok: true, baseURL, apiKey: key, sourceType: 'newapi_channel_conn' }
 })

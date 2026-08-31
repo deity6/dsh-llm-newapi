@@ -80,16 +80,18 @@ function stubModelsListing() {
 {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
-  const fiber = await mountPlugin(ctx)
+  // A legacy FLAT section (pre-0.9.0) folds into the single `default`
+  // instance: route newapi-default, credential ref newapi_default.
+  const fiber = await mountPlugin(ctx, { baseURL: 'https://gw.test/v1' })
 
   assert.deepEqual(
     ctx.llm.listProviders().map(provider => ({ id: provider.id, name: provider.name })),
-    [{ id: 'newapi', name: 'NewAPI' }],
+    [{ id: 'newapi-default', name: 'NewAPI' }],
   )
 
   const directory = ctx.llm.listConfigurableProviders()
   assert.equal(directory.length, 1)
-  assert.equal(directory[0].provider, 'newapi')
+  assert.equal(directory[0].provider, 'newapi-default')
   assert.equal(directory[0].displayName, 'NewAPI')
   assert.equal(directory[0].settingsNs, 'llm-newapi')
   assert.deepEqual(directory[0].settingsPath, [])
@@ -125,7 +127,7 @@ function stubModelsListing() {
   // failure names the settings page, not an environment variable.
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
-  await mountPlugin(ctx)
+  await mountPlugin(ctx, { baseURL: 'http://gw.test/v1' })
   await assert.rejects(
     ctx.llm.discoverModels('llm-newapi', { baseURL: 'http://gw.local:3000/v1' }),
     (error) => error.code === 'MISSING_CREDENTIAL'
@@ -133,15 +135,15 @@ function stubModelsListing() {
       && !error.message.includes('export'),
   )
 
-  // With the service holding the fixed 'newapi' reference, discovery rides
-  // the stored value as the bearer token.
+  // With the service holding the derived 'newapi_default' reference, discovery
+  // rides the stored value as the bearer token.
   const ctx2 = new Context()
   await ctx2.plugin(LlmRuntime)
-  await ctx2.plugin(FakeCredentials, { newapi: 'stored-key' })
-  await mountPlugin(ctx2)
+  await ctx2.plugin(FakeCredentials, { newapi_default: 'stored-key' })
+  await mountPlugin(ctx2, { baseURL: 'http://gw.test/v1' })
   const { asked, restore } = stubModelsListing()
   try {
-    const found = await ctx2.llm.discoverModels('llm-newapi', { provider: 'newapi' })
+    const found = await ctx2.llm.discoverModels('llm-newapi', { provider: 'newapi-default' })
     assert.equal(found.length, 2)
   } finally {
     restore()
@@ -154,7 +156,7 @@ function stubModelsListing() {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(MemorySettings, {})
-  await ctx.plugin(FakeCredentials, { newapi: 'block-c-key' })
+  await ctx.plugin(FakeCredentials, { newapi_default: 'block-c-key' })
   await mountPlugin(ctx)
 
   // A schema-valid but unserviceable baseURL rejects at the write, so it can
@@ -168,7 +170,7 @@ function stubModelsListing() {
   await ctx.settings.update(settingsNamespace('llm-newapi'), { baseURL: 'http://settings-gw:9000/v1' })
   const { asked, restore } = stubModelsListing()
   try {
-    const found = await ctx.llm.discoverModels('llm-newapi', { provider: 'newapi' })
+    const found = await ctx.llm.discoverModels('llm-newapi', { provider: 'newapi-default' })
     assert.equal(found.length, 2)
   } finally {
     restore()
@@ -180,8 +182,8 @@ function stubModelsListing() {
 {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
-  await ctx.plugin(FakeCredentials, { newapi: 'key-d' })
-  await mountPlugin(ctx)
+  await ctx.plugin(FakeCredentials, { newapi_default: 'key-d' })
+  await mountPlugin(ctx, { baseURL: 'http://gw.test/v1' })
 
   // Discovery sorts by id and derives routed display names from the last path segment.
   const originalFetch = globalThis.fetch
@@ -195,7 +197,7 @@ function stubModelsListing() {
   }), { status: 200, headers: { 'content-type': 'application/json' } })
   let discovered
   try {
-    discovered = await ctx.llm.discoverModels('llm-newapi', { provider: 'newapi' })
+    discovered = await ctx.llm.discoverModels('llm-newapi', { provider: 'newapi-default' })
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -294,11 +296,13 @@ function stubModelsListing() {
   assert.equal(wired.reasoning_effort, 'high')
   assert.equal('reasoning_effort' in plugin.serializeRequest({ model: 'qwen3-32b', messages: [] }), false)
 
-  // The settings write point refuses an enabled proxy with a non-http(s) url.
+  // The settings write point refuses an enabled proxy with a non-http(s) url
+  // (the flat section folds into the default instance, whose custom-mode proxy
+  // is resolved and rejected at validation).
   await ctx.plugin(MemorySettings, {})
   await assert.rejects(
-    ctx.settings.update(settingsNamespace('llm-newapi'), { proxy: { enabled: true, url: 'ftp://x' } }),
-    (error) => error.message.includes('proxy.url must be an http(s) URL'),
+    ctx.settings.update(settingsNamespace('llm-newapi'), { baseURL: 'http://gw.test/v1', proxy: { enabled: true, url: 'ftp://x' } }),
+    (error) => error.message.includes('proxy.url must be an absolute http(s) URL'),
   )
 }
 
@@ -308,7 +312,9 @@ function stubModelsListing() {
   await ctx.plugin(LlmRuntime)
   // The plugin mounts BEFORE the connection service — exactly the ordering
   // that silently skipped the channel when it was read with an eager ctx.get.
-  await mountPlugin(ctx)
+  // A configured instance is required so the models-dev handler passes its
+  // "no instances" guard and reaches the catalog download.
+  await mountPlugin(ctx, { baseURL: 'https://gw.test/v1' })
 
   const registered = []
   class FakeConnection extends Service {
@@ -371,7 +377,9 @@ function stubModelsListing() {
     resolveApiKey: async () => 'unused',
   })
   await ctx.plugin({ inject: ['llm'], apply: (c) => { c.llm.registerAdapter(['zeta'], officialAdapter) } })
-  await mountPlugin(ctx)
+  // A configured instance lets the models-dev handler reach the download
+  // (the "no instances" guard sits before any network use).
+  await mountPlugin(ctx, { baseURL: 'https://gw.test/v1' })
 
   const channels = []
   class FakeConnectionH extends Service {
