@@ -152,19 +152,19 @@ export function serializeAnthropicRequest(options: GenerateOptions): AnthropicRe
   }
 }
 
-/** Anthropic usage → disjoint harness WireUsage (cache reads subtracted). */
+/** Anthropic usage → WireUsage (cache reads stay reported separately). */
 function mapAnthropicUsage(usage: {
   input_tokens?: number
   output_tokens?: number
   cache_read_input_tokens?: number
 }): WireUsage {
-  // Anthropic input_tokens INCLUDES cache reads; harness TokenUsage wants
-  // disjoint counts, so cache reads are subtracted out (same convention as
-  // the OpenAI path).
-  const inputTokens = usage.input_tokens ?? 0
+  // Anthropic input_tokens INCLUDES cache reads; the shared translate
+  // assembler subtracts `prompt_tokens_details.cached_tokens` once, so the
+  // wire value keeps the full count and the harness receives disjoint
+  // numbers — the same convention as the OpenAI path.
   const cacheRead = usage.cache_read_input_tokens ?? 0
   return {
-    prompt_tokens: inputTokens - cacheRead,
+    prompt_tokens: usage.input_tokens ?? 0,
     completion_tokens: usage.output_tokens ?? 0,
     ...cacheRead > 0 ? { prompt_tokens_details: { cached_tokens: cacheRead } } : {},
   }

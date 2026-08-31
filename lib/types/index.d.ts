@@ -21,6 +21,7 @@ import type { ProviderHints } from './types.js';
 export { DEFAULT_CONTEXT_WINDOW, DEFAULT_MODEL_EXCLUDE_PATTERNS, DEFAULT_PROVIDER_HINTS, DEFAULT_STREAM_IDLE_TIMEOUT_MS, matchModelsDev, modelNameFromId, NewApiAdapter, normalizeBaseUrl, PKG, } from './adapter.js';
 export { serializeRequest } from './serialize.js';
 export { anthropicEventsToWire, serializeAnthropicRequest } from './anthropic.js';
+export { responsesEventsToWire, serializeResponsesRequest } from './responses.js';
 export type { NewApiAdapterOptions, NewApiCatalogModel, NewApiConnectionOptions } from './adapter.js';
 export type * from './types.js';
 export { parseChannelConn, registerChannelConnParser } from './channel-conn.js';
@@ -75,9 +76,10 @@ export interface NewApiInstanceConfig {
     apiKeyEnv?: string;
     /**
      * Wire protocol spoken with this gateway: OpenAI-compatible
-     * `/chat/completions` (default) or Anthropic Messages (`/v1/messages`).
+     * `/chat/completions` (default), Anthropic Messages (`/v1/messages`), or
+     * OpenAI Responses (`/v1/responses`).
      */
-    protocol?: 'openai' | 'anthropic';
+    protocol?: 'openai' | 'anthropic' | 'responses';
     /**
      * Extra API keys for the same instance. NewAPI groups keys into buckets,
      * each seeing a different model set — discovery merges every key's listing

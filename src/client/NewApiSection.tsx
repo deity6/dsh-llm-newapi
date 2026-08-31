@@ -110,7 +110,9 @@ function draftOf(entry: Record<string, unknown>): InstanceDraft {
     id: typeof entry.id === 'string' ? entry.id : '',
     displayName: typeof entry.displayName === 'string' ? entry.displayName : '',
     baseURL: typeof entry.baseURL === 'string' ? entry.baseURL : '',
-    protocol: entry.protocol === 'anthropic' ? 'anthropic' as const : 'openai' as const,
+    protocol: entry.protocol === 'anthropic' ? 'anthropic' as const
+      : entry.protocol === 'responses' ? 'responses' as const
+      : 'openai' as const,
     keys: Array.isArray(entry.keys)
       ? entry.keys
         .filter(key => typeof key === 'object' && key !== null && !Array.isArray(key))
@@ -174,6 +176,7 @@ function serializeInstance(draft: InstanceDraft): Record<string, unknown> {
     // writing it here is what lights up its configured/missing dot.
     apiKeyEnv: clientRefOf(id),
     ...draft.protocol === 'anthropic' ? { protocol: 'anthropic' as const } : {},
+    ...draft.protocol === 'responses' ? { protocol: 'responses' as const } : {},
     ...draft.keys.length > 0
       ? {
         keys: draft.keys

@@ -48,6 +48,7 @@ export {
 } from './adapter.ts'
 export { serializeRequest } from './serialize.ts'
 export { anthropicEventsToWire, serializeAnthropicRequest } from './anthropic.ts'
+export { responsesEventsToWire, serializeResponsesRequest } from './responses.ts'
 export type { NewApiAdapterOptions, NewApiCatalogModel, NewApiConnectionOptions } from './adapter.ts'
 export type * from './types.ts'
 export { parseChannelConn, registerChannelConnParser } from './channel-conn.ts'
@@ -136,9 +137,10 @@ export interface NewApiInstanceConfig {
   apiKeyEnv?: string
   /**
    * Wire protocol spoken with this gateway: OpenAI-compatible
-   * `/chat/completions` (default) or Anthropic Messages (`/v1/messages`).
+   * `/chat/completions` (default), Anthropic Messages (`/v1/messages`), or
+   * OpenAI Responses (`/v1/responses`).
    */
-  protocol?: 'openai' | 'anthropic'
+  protocol?: 'openai' | 'anthropic' | 'responses'
   /**
    * Extra API keys for the same instance. NewAPI groups keys into buckets,
    * each seeing a different model set — discovery merges every key's listing
@@ -584,6 +586,7 @@ export function resolveAdapterOptions(
     baseURL: normalizeBaseUrl(rawBase),
     apiKeyRef: ref,
     ...instanceConfig.protocol === 'anthropic' ? { protocol: 'anthropic' as const } : {},
+    ...instanceConfig.protocol === 'responses' ? { protocol: 'responses' as const } : {},
     ...instanceConfig.keys !== undefined && instanceConfig.keys.length > 0 ? {
       keys: instanceConfig.keys.map(entry => ({
         id: entry.id,

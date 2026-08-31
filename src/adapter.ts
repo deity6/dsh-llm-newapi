@@ -55,6 +55,7 @@ import type {
 } from './types.ts'
 import { defaultReasoningEffortsFor } from './efforts.ts'
 import { anthropicEventsToWire, serializeAnthropicRequest } from './anthropic.ts'
+import { responsesEventsToWire, serializeResponsesRequest } from './responses.ts'
 
 /** Prefix for adapter-raised diagnostics. */
 export const PKG = 'llm-newapi'
@@ -112,10 +113,11 @@ export interface NewApiConnectionOptions {
   apiKeyRef: CredentialRef
   /**
    * Wire protocol spoken with this gateway: OpenAI-compatible
-   * `/chat/completions` (default) or Anthropic Messages (`/v1/messages`).
-   * NewAPI-style relay stations often front both on the same endpoint.
+   * `/chat/completions` (default), Anthropic Messages (`/v1/messages`), or
+   * OpenAI Responses (`/v1/responses`). NewAPI-style relay stations often
+   * front several of these on the same endpoint.
    */
-  protocol?: 'openai' | 'anthropic'
+  protocol?: 'openai' | 'anthropic' | 'responses'
   /**
    * Extra API keys for the same instance. NewAPI groups keys into buckets,
    * each seeing a different model set, so discovery merges every key's
@@ -870,26 +872,29 @@ export class NewApiAdapter extends LlmAdapter {
     // succeeded (a rejected key would waste the request) and only when the
     // caller named a chat model. Billed a handful of tokens at most.
     if (result.authValid === true && request.chatModel !== undefined) {
-      result.chat = await this.probeChat(base, apiKey, proxyUrl, headers, request)
+      result.chat = await this.probeChat(base, apiKey, proxyUrl, headers, request, connection.protocol)
     }
     // Optional minimal-cost tool-call probe: verifies the gateway's
     // function-calling path end to end (some gateways answer /models and text
     // chat yet strip `tools`). Runs under the same auth gate.
     if (result.authValid === true && request.toolCallModel !== undefined) {
-      result.toolCall = await this.probeToolCall(base, apiKey, proxyUrl, headers, request)
+      result.toolCall = await this.probeToolCall(base, apiKey, proxyUrl, headers, request, connection.protocol)
     }
     return result
   }
 
   /**
-   * One minimal chat-completion probe: `POST /chat/completions` asking the
-   * model to reply "ok" with `max_tokens: 5`, bounded by the caller's
-   * `chatTimeoutMs` (default 20s). Never throws; every failure is returned
-   * as a structured {@link ChatProbeResult}.
-   * @param base - normalized gateway base (chat path appended here).
+   * One minimal chat probe, protocol-aware: `POST /chat/completions`
+   * (openai), `POST /messages` (anthropic, `x-api-key` auth) or
+   * `POST /responses` (responses), asking the model to reply "ok" with a
+   * tight output cap, bounded by the caller's `chatTimeoutMs` (default 20s).
+   * Never throws; every failure is returned as a structured
+   * {@link ChatProbeResult}.
+   * @param base - normalized gateway base (protocol path appended here).
    * @param apiKey - the resolved probe credential.
    * @param proxyUrl - the effective forward proxy (request override or snapshot).
    * @param request - the probe draft (chat model, timeout, cancellation).
+   * @param protocol - the instance's wire protocol.
    * @returns the chat outcome — never throws.
    */
   private async probeChat(
@@ -898,6 +903,7 @@ export class NewApiAdapter extends LlmAdapter {
     proxyUrl: string | undefined,
     headers: Record<string, string> | undefined,
     request: ProbeRequest,
+    protocol: NewApiConnectionOptions['protocol'],
   ): Promise<ChatProbeResult> {
     const chatStarted = Date.now()
     const timeoutMs = request.chatTimeoutMs ?? CHAT_PROBE_DEFAULT_TIMEOUT_MS
@@ -906,20 +912,40 @@ export class NewApiAdapter extends LlmAdapter {
     request.signal?.addEventListener('abort', onAbort, { once: true })
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const response = await gatewayFetch(`${base}/chat/completions`, {
+      const wire = protocol ?? 'openai'
+      const chatPath = wire === 'anthropic' ? '/messages' : wire === 'responses' ? '/responses' : '/chat/completions'
+      const chatHeaders = wire === 'anthropic'
+        ? {
+          ...headers ?? {},
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          accept: 'application/json',
+          ...attributionHeaders(),
+        }
+        : gatewayHeaders(headers, apiKey, 'application/json', 'application/json')
+      const chatBody = wire === 'anthropic'
+        ? { model: request.chatModel, max_tokens: 5, messages: [{ role: 'user', content: 'Reply with exactly: ok' }] }
+        : wire === 'responses'
+          ? { model: request.chatModel, input: [{ role: 'user', content: 'Reply with exactly: ok' }], max_output_tokens: 5 }
+          : {
+            model: request.chatModel,
+            messages: [{ role: 'user', content: 'Reply with exactly: ok' }],
+            max_tokens: 5,
+            stream: false,
+          }
+      const response = await gatewayFetch(`${base}${chatPath}`, {
         method: 'POST',
-        headers: gatewayHeaders(headers, apiKey, 'application/json', 'application/json'),
-        body: JSON.stringify({
-          model: request.chatModel,
-          messages: [{ role: 'user', content: 'Reply with exactly: ok' }],
-          max_tokens: 5,
-          stream: false,
-        }),
+        headers: chatHeaders,
+        body: JSON.stringify(chatBody),
         signal: controller.signal,
       }, proxyUrl)
       const latencyMs = Date.now() - chatStarted
       let body: {
         choices?: Array<{ message?: { content?: string }; finish_reason?: string }>
+        content?: Array<{ text?: string }>
+        output_text?: string
+        status?: string
         error?: { message?: string }
       } = {}
       try {
@@ -936,13 +962,21 @@ export class NewApiAdapter extends LlmAdapter {
           error: body.error?.message ?? `HTTP ${response.status}`,
         }
       }
-      const choice = body.choices?.[0]
+      // Each protocol carries its text in a different field.
+      const text = wire === 'anthropic'
+        ? body.content?.[0]?.text
+        : wire === 'responses'
+          ? (body.output_text ?? body.content?.[0]?.text)
+          : body.choices?.[0]?.message?.content
+      const finishReason = wire === 'responses'
+        ? (body.status === 'incomplete' ? 'length' : 'stop')
+        : body.choices?.[0]?.finish_reason
       return {
         ok: true,
         status: response.status,
         latencyMs,
-        ...choice?.message?.content !== undefined ? { text: choice.message.content } : {},
-        ...choice?.finish_reason !== undefined ? { finishReason: choice.finish_reason } : {},
+        ...text !== undefined && text !== null ? { text } : {},
+        ...finishReason !== undefined ? { finishReason } : {},
       }
     } catch (error: unknown) {
       const latencyMs = Date.now() - chatStarted
@@ -967,16 +1001,18 @@ export class NewApiAdapter extends LlmAdapter {
   }
 
   /**
-   * One minimal tool-call probe: `POST /chat/completions` declaring a `ping`
-   * function and asking the model to call it, bounded by `toolCallTimeoutMs`
-   * (default 30s). Never throws; every failure is returned as a structured
-   * {@link ToolCallProbeResult}. Success means the gateway's function-calling
-   * path answered with a real `tool_calls` entry — the failure mode that a
-   * plain text chat probe cannot see.
-   * @param base - normalized gateway base (chat path appended here).
+   * One minimal tool-call probe, protocol-aware: declares a `ping` function
+   * and asks the model to call it, over `/chat/completions` (openai),
+   * `/messages` (anthropic) or `/responses` (responses), bounded by
+   * `toolCallTimeoutMs` (default 30s). Never throws; every failure is
+   * returned as a structured {@link ToolCallProbeResult}. Success means the
+   * gateway's function-calling path answered with a real tool entry — the
+   * failure mode that a plain text chat probe cannot see.
+   * @param base - normalized gateway base (protocol path appended here).
    * @param apiKey - the resolved probe credential.
    * @param proxyUrl - the effective forward proxy (request override or snapshot).
    * @param request - the probe draft (tool model, timeout, cancellation).
+   * @param protocol - the instance's wire protocol.
    * @returns the tool-call outcome — never throws.
    */
   private async probeToolCall(
@@ -985,6 +1021,7 @@ export class NewApiAdapter extends LlmAdapter {
     proxyUrl: string | undefined,
     headers: Record<string, string> | undefined,
     request: ProbeRequest,
+    protocol: NewApiConnectionOptions['protocol'],
   ): Promise<ToolCallProbeResult> {
     const started = Date.now()
     const timeoutMs = request.toolCallTimeoutMs ?? TOOL_PROBE_DEFAULT_TIMEOUT_MS
@@ -993,32 +1030,76 @@ export class NewApiAdapter extends LlmAdapter {
     request.signal?.addEventListener('abort', onAbort, { once: true })
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const response = await gatewayFetch(`${base}/chat/completions`, {
-        method: 'POST',
-        headers: gatewayHeaders(headers, apiKey, 'application/json', 'application/json'),
-        body: JSON.stringify({
+      const wire = protocol ?? 'openai'
+      const toolPath = wire === 'anthropic' ? '/messages' : wire === 'responses' ? '/responses' : '/chat/completions'
+      const toolHeaders = wire === 'anthropic'
+        ? {
+          ...headers ?? {},
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          accept: 'application/json',
+          ...attributionHeaders(),
+        }
+        : gatewayHeaders(headers, apiKey, 'application/json', 'application/json')
+      const toolBody = wire === 'anthropic'
+        ? {
           model: request.toolCallModel,
+          max_tokens: 32,
           messages: [{
             role: 'user',
             content: 'Call the ping function. Reply with nothing else.',
           }],
           tools: [{
-            type: 'function',
-            function: {
+            name: 'ping',
+            description: 'A no-op health check that returns pong.',
+            input_schema: { type: 'object', properties: {}, additionalProperties: false },
+          }],
+        }
+        : wire === 'responses'
+          ? {
+            model: request.toolCallModel,
+            input: [{
+              role: 'user',
+              content: 'Call the ping function. Reply with nothing else.',
+            }],
+            tools: [{
+              type: 'function',
               name: 'ping',
               description: 'A no-op health check that returns pong.',
               parameters: { type: 'object', properties: {}, additionalProperties: false },
-            },
-          }],
-          tool_choice: 'auto',
-          max_tokens: 32,
-          stream: false,
-        }),
+            }],
+            max_output_tokens: 32,
+          }
+          : {
+            model: request.toolCallModel,
+            messages: [{
+              role: 'user',
+              content: 'Call the ping function. Reply with nothing else.',
+            }],
+            tools: [{
+              type: 'function',
+              function: {
+                name: 'ping',
+                description: 'A no-op health check that returns pong.',
+                parameters: { type: 'object', properties: {}, additionalProperties: false },
+              },
+            }],
+            tool_choice: 'auto',
+            max_tokens: 32,
+            stream: false,
+          }
+      const response = await gatewayFetch(`${base}${toolPath}`, {
+        method: 'POST',
+        headers: toolHeaders,
+        body: JSON.stringify(toolBody),
         signal: controller.signal,
       }, proxyUrl)
       const latencyMs = Date.now() - started
       let body: {
         choices?: Array<{ message?: { tool_calls?: Array<{ function?: { name?: string } }> } }>
+        content?: Array<{ type?: string; name?: string }>
+        output?: Array<{ type?: string; name?: string }>
         error?: { message?: string }
       } = {}
       try {
@@ -1034,14 +1115,19 @@ export class NewApiAdapter extends LlmAdapter {
           error: body.error?.message ?? `HTTP ${response.status}`,
         }
       }
-      const toolName = body.choices?.[0]?.message?.tool_calls?.[0]?.function?.name
+      // Each protocol reports the tool call in a different field.
+      const toolName = wire === 'anthropic'
+        ? body.content?.find(block => block.type === 'tool_use')?.name
+        : wire === 'responses'
+          ? body.output?.find(item => item.type === 'function_call')?.name
+          : body.choices?.[0]?.message?.tool_calls?.[0]?.function?.name
       return toolName !== undefined && toolName.length > 0
         ? { ok: true, status: response.status, latencyMs, toolName }
         : {
           ok: false,
           status: response.status,
           latencyMs,
-          error: 'gateway returned no tool_calls (tools passthrough may be stripped)',
+          error: 'gateway returned no tool call (tools passthrough may be stripped)',
         }
     } catch (error: unknown) {
       const latencyMs = Date.now() - started
@@ -1235,6 +1321,10 @@ export class NewApiAdapter extends LlmAdapter {
       yield* this.anthropicRequest(options, signal, connection, apiKey, onComment)
       return
     }
+    if (connection.protocol === 'responses') {
+      yield* this.responsesRequest(options, signal, connection, apiKey, onComment)
+      return
+    }
     const body = serializeRequest(options)    // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)
@@ -1322,6 +1412,52 @@ export class NewApiAdapter extends LlmAdapter {
 
     // Anthropic streams carry no [DONE] sentinel — EOF closes the stream.
     yield* translate(anthropicEventsToWire(parseSse(response.body, onComment, false)))
+  }
+
+  /**
+   * OpenAI Responses variant of {@link request}: serializes the harness call
+   * onto Responses input items, posts to `/responses` with the OpenAI Bearer
+   * header, and funnels the Responses event stream through the shared
+   * translate assembler via {@link responsesEventsToWire}.
+   */
+  private async * responsesRequest(
+    options: GenerateOptions,
+    signal: AbortSignal,
+    connection: NewApiConnectionOptions,
+    apiKey: string,
+    onComment: () => void,
+  ): AsyncIterable<StreamChunk> {
+    const body = serializeResponsesRequest(options)
+    const payload = JSON.stringify(body)
+    const headers = gatewayHeaders(connection.headers, apiKey, 'application/json', 'text/event-stream')
+
+    let response: Response
+    try {
+      response = await gatewayFetch(`${connection.baseURL}/responses`, {
+        method: 'POST',
+        headers,
+        body: payload,
+        signal,
+      }, connection.proxyUrl)
+    } catch (error: unknown) {
+      if (signal.aborted) throw error
+      throw new LlmError(
+        `NewAPI Responses request to ${connection.baseURL} failed`,
+        'TRANSPORT',
+        { cause: error },
+      )
+    }
+
+    if (!response.ok) {
+      await this.raiseForResponse(response, connection.baseURL)
+    }
+    if (!response.body) {
+      throw new LlmError('NewAPI returned no response body', 'EMPTY_RESPONSE')
+    }
+
+    // Responses streams carry no [DONE] sentinel — response.completed closes
+    // the stream, exactly like Anthropic's message_stop.
+    yield* translate(responsesEventsToWire(parseSse(response.body, onComment, false)))
   }
 
   /**

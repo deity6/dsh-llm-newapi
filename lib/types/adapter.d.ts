@@ -66,10 +66,11 @@ export interface NewApiConnectionOptions {
     apiKeyRef: CredentialRef;
     /**
      * Wire protocol spoken with this gateway: OpenAI-compatible
-     * `/chat/completions` (default) or Anthropic Messages (`/v1/messages`).
-     * NewAPI-style relay stations often front both on the same endpoint.
+     * `/chat/completions` (default), Anthropic Messages (`/v1/messages`), or
+     * OpenAI Responses (`/v1/responses`). NewAPI-style relay stations often
+     * front several of these on the same endpoint.
      */
-    protocol?: 'openai' | 'anthropic';
+    protocol?: 'openai' | 'anthropic' | 'responses';
     /**
      * Extra API keys for the same instance. NewAPI groups keys into buckets,
      * each seeing a different model set, so discovery merges every key's
@@ -290,28 +291,33 @@ export declare class NewApiAdapter extends LlmAdapter {
      */
     probeConnection(request: ProbeRequest): Promise<ProbeResult>;
     /**
-     * One minimal chat-completion probe: `POST /chat/completions` asking the
-     * model to reply "ok" with `max_tokens: 5`, bounded by the caller's
-     * `chatTimeoutMs` (default 20s). Never throws; every failure is returned
-     * as a structured {@link ChatProbeResult}.
-     * @param base - normalized gateway base (chat path appended here).
+     * One minimal chat probe, protocol-aware: `POST /chat/completions`
+     * (openai), `POST /messages` (anthropic, `x-api-key` auth) or
+     * `POST /responses` (responses), asking the model to reply "ok" with a
+     * tight output cap, bounded by the caller's `chatTimeoutMs` (default 20s).
+     * Never throws; every failure is returned as a structured
+     * {@link ChatProbeResult}.
+     * @param base - normalized gateway base (protocol path appended here).
      * @param apiKey - the resolved probe credential.
      * @param proxyUrl - the effective forward proxy (request override or snapshot).
      * @param request - the probe draft (chat model, timeout, cancellation).
+     * @param protocol - the instance's wire protocol.
      * @returns the chat outcome — never throws.
      */
     private probeChat;
     /**
-     * One minimal tool-call probe: `POST /chat/completions` declaring a `ping`
-     * function and asking the model to call it, bounded by `toolCallTimeoutMs`
-     * (default 30s). Never throws; every failure is returned as a structured
-     * {@link ToolCallProbeResult}. Success means the gateway's function-calling
-     * path answered with a real `tool_calls` entry — the failure mode that a
-     * plain text chat probe cannot see.
-     * @param base - normalized gateway base (chat path appended here).
+     * One minimal tool-call probe, protocol-aware: declares a `ping` function
+     * and asks the model to call it, over `/chat/completions` (openai),
+     * `/messages` (anthropic) or `/responses` (responses), bounded by
+     * `toolCallTimeoutMs` (default 30s). Never throws; every failure is
+     * returned as a structured {@link ToolCallProbeResult}. Success means the
+     * gateway's function-calling path answered with a real tool entry — the
+     * failure mode that a plain text chat probe cannot see.
+     * @param base - normalized gateway base (protocol path appended here).
      * @param apiKey - the resolved probe credential.
      * @param proxyUrl - the effective forward proxy (request override or snapshot).
      * @param request - the probe draft (tool model, timeout, cancellation).
+     * @param protocol - the instance's wire protocol.
      * @returns the tool-call outcome — never throws.
      */
     private probeToolCall;
@@ -348,6 +354,13 @@ export declare class NewApiAdapter extends LlmAdapter {
      * {@link anthropicEventsToWire}.
      */
     private anthropicRequest;
+    /**
+     * OpenAI Responses variant of {@link request}: serializes the harness call
+     * onto Responses input items, posts to `/responses` with the OpenAI Bearer
+     * header, and funnels the Responses event stream through the shared
+     * translate assembler via {@link responsesEventsToWire}.
+     */
+    private responsesRequest;
     /**
      * Turn a non-OK gateway response into a typed {@link LlmError}, parsing the
      * error body when it is well-formed. Shared by both protocol branches.

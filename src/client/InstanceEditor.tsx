@@ -41,10 +41,10 @@ export interface InstanceDraft {
   /** Gateway base including the `/v1` prefix. */
   baseURL: string
   /**
-   * Wire protocol: OpenAI-compatible `/chat/completions` (default) or
-   * Anthropic Messages (`/v1/messages`).
+   * Wire protocol: OpenAI-compatible `/chat/completions` (default),
+   * Anthropic Messages (`/v1/messages`), or OpenAI Responses (`/v1/responses`).
    */
-  protocol: 'openai' | 'anthropic'
+  protocol: 'openai' | 'anthropic' | 'responses'
   /**
    * Extra API keys. NewAPI groups keys into buckets, each seeing a different
    * model set; the key id (k2, k3, …) forms the credential reference
@@ -642,13 +642,19 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
           id={`newapi-instance-protocol-${index}`} className="newapi-input newapi-select"
           value={draft.protocol}
           onChange={(event) => {
-            const protocol = event.target.value === 'anthropic' ? 'anthropic' as const : 'openai' as const
+            const protocol = event.target.value === 'anthropic' ? 'anthropic' as const
+              : event.target.value === 'responses' ? 'responses' as const
+              : 'openai' as const
             patch({ protocol })
-            notify(`${t('protocol')} → ${protocol === 'anthropic' ? t('protocolAnthropic') : t('protocolOpenai')}`, 'info')
+            const label = protocol === 'anthropic' ? t('protocolAnthropic')
+              : protocol === 'responses' ? t('protocolResponses')
+              : t('protocolOpenai')
+            notify(`${t('protocol')} → ${label}`, 'info')
           }}
         >
           <option value="openai">{t('protocolOpenai')}</option>
           <option value="anthropic">{t('protocolAnthropic')}</option>
+          <option value="responses">{t('protocolResponses')}</option>
         </select>
         <p className="newapi-hint">{t('protocolHint')}</p>
       </div>

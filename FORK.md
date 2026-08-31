@@ -247,3 +247,21 @@ registerChannelConnParser('mygw_token', (obj) => {
     密钥输入、删除清 pending）；草稿/序列化 round-trip；legacy 分支补全字段。
   - 回归：新增 `protocol-smoke`（序列化/事件翻译/多密钥合并+路由 17 断言）；
     vitest 16 例 + 全部 smoke 绿。
+- `0.9.12`：**OpenAI Responses 协议（第三个 wire protocol）+ probe 协议化 + 重试显示优化**。
+  - **Responses 协议**：实例 `protocol: 'responses'` → 序列化到 Responses input items
+    （`function_call_output` 先于该 user 消息的 text 输出，保证 function_call 紧跟其 output，
+    符合 API 严格顺序规则）→ POST `/v1/responses`（Bearer）→ `responsesEventsToWire`
+    事件翻译（output_text.delta→content、reasoning delta→reasoning_content、
+    function_call_arguments.delta→工具参数、completed→finish+usage、无 [DONE] 哨兵）→
+    复用共享 translate。`reasoning.effort` 映射自 harness 档位。
+  - **probe 协议化**（修掉 anthropic 协议下 chat/tool 探测写死 /chat/completions 的 bug）：
+    probeChat/probeToolCall 按协议打 /messages、/responses 或 /chat/completions，并解析
+    对应字段；anthropic 探测用 x-api-key + anthropic-version。
+  - **usage 一致性修复**：anthropic 的 mapAnthropicUsage 曾自行减 cache，而共享 translate
+    又减一次（double-subtract）——改为 wire 层保留含 cache 原值、cache 单列 details，
+    由 translate 统一减，与 OpenAI/Responses 路径一致。
+  - **baseURL 提示文案更新**（不再只有 /chat/completions 一种说法）。
+  - 回归：protocol-smoke 42 断言（新增 responses 序列化/事件翻译/probe 协议化 15 项）。
+- `0.9.12b`（harness 核心包，非插件）：`dsh-client-ui-conversation` 重试显示优化——
+  zh「{label}（{retry}/{maximum}） · {seconds}s」→「{label} · 第 {retry}/{maximum} 次 ·
+  约 {seconds} 秒后」；en 同步「attempt x/y · in ~Ns」；重试延迟详情 ms→秒。
