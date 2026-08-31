@@ -176,3 +176,22 @@ registerChannelConnParser('mygw_token', (obj) => {
   - models.dev 目录下载（第三方主机）刻意**不**注入自定义头。
   - 回归：migrate-smoke 增补 headers 解析断言；build:host + build:client +
     typecheck 全绿。
+- `0.9.8`：**人性化交互（toast / 两段式删除 / 撤销）+ 推理档位默认配置**。
+  - **toast 系统**（`NewApiSection`）：保存成功 → 底部绿色气泡「已保存 · 已即时
+    生效」（settings 热生效，无需重启）；行级删除（模型行/请求头）→ 橙色气泡
+    带「撤销」按钮，6s 内一键还原原位（闭包持有删除前快照）；错误仍内联展示。
+    三类反馈形式各异（气泡/确认/内联），删除无 undo 冗余。
+  - **两段式删除确认**（实例）：删除实例按钮第一次点击进入「确认删除？」武装态
+    （3.5s 自动解除），第二次点击才真正删除——误触零代价。实例删除是破坏性的
+    （拆路由 + 凭据孤立），所以用确认而非撤销。
+  - **同名校验**：实例 displayName（供应商标签）重复时拒绝保存——模型选择器按
+    组名区分，两个同名供应商无法分辨。locale 新增 instanceNameDuplicate。
+  - **推理档位默认配置**（`src/efforts.ts`，任务 4b）：`resolveModel` 对未声明
+    reasoningEfforts 的目录行做**家族前缀兜底**——glm→[low/medium/high]、
+    gpt-5/o 系→[none/low/medium/high]、deepseek-chat→hybrid、deepseek-r1→
+    reasoner、qwen/kimi/claude/grok→三档等，默认选中 medium。**运行时只读**：
+    不写回存储目录，models.dev 拉取或手工配置的档位永远优先；未知家族保持
+    静默（不虚构能力）。效果：对话模型选择器对新网关模型立即出现档位菜单。
+    设计参照 models.dev `reasoning_options` 与 dsh 内置 provider 目录。
+  - 回归：client 测试新增 3 例（同名拒绝 / 两段式删除 / 撤销恢复），共 15 例
+    全过；resolveModel 档位兜底行为单测通过（含"显式配置优先"）。

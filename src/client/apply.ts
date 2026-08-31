@@ -258,6 +258,44 @@ const SECTION_CSS = `
 .newapi-instance-actions {
   display: flex; align-items: center; gap: 2px;
 }
+/* Armed removal: the two-step instance-delete confirm state. */
+.newapi-confirm {
+  background: var(--dsw-alias-state-error-primary);
+  color: #fff;
+}
+.newapi-confirm:hover:not(:disabled) { background: var(--dsw-alias-state-error-primary); color: #fff; }
+/* Transient feedback toasts (save success, undo pills). */
+.newapi-toasts {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  z-index: 1000; pointer-events: none;
+}
+.newapi-toast {
+  box-sizing: border-box; display: flex; align-items: center; gap: 10px;
+  max-width: min(520px, calc(100vw - 48px));
+  padding: 9px 14px; border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-specific-menu);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-shadow-lv3);
+  font-size: 13px; line-height: 18px;
+  pointer-events: auto;
+  animation: newapi-toast-in .18s ease;
+}
+@keyframes newapi-toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.newapi-toast--ok { border-color: var(--dsw-alias-state-success-primary); }
+.newapi-toast--undo { border-color: var(--dsw-alias-state-warn-primary); }
+.newapi-toast-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.newapi-toast-undo {
+  flex: none; padding: 2px 8px; border: none; border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-brand-primary);
+  font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.newapi-toast-undo:hover { background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); }
 `
 
 /** Required services (cordis fiber inject): the section slot, copy, and the wire face. */

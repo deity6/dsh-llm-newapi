@@ -205,6 +205,12 @@ export interface InstanceEditorProps {
   /** Lift the pending key draft up (empty string = nothing to store). */
   onPendingKey: (value: string) => void
   onRemove: () => void
+  /**
+   * Transient feedback from inside the card: a toast with an optional undo
+   * action (used by row removals — the instance removal is a two-step
+   * confirm instead, so it never needs an undo).
+   */
+  notify: (text: string, kind: 'ok' | 'info' | 'undo', onUndo?: () => void) => void
 }
 
 /**
@@ -214,7 +220,7 @@ export interface InstanceEditorProps {
  * @returns the card.
  */
 export function InstanceEditor(props: InstanceEditorProps): ReactNode {
-  const { index, draft, keyConfigured, keyLocked, api, t, fetchModelParams, probe, parseChannelConn, onPatch, onPendingKey, onRemove } = props
+  const { index, draft, keyConfigured, keyLocked, api, t, fetchModelParams, probe, parseChannelConn, onPatch, onPendingKey, onRemove, notify } = props
   const [keyDraft, setKeyDraft] = useState('')
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set())
   const [editing, setEditing] = useState<ReadonlyMap<string, string>>(new Map())
@@ -234,6 +240,17 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
   const [importText, setImportText] = useState('')
   const [importBusy, setImportBusy] = useState(false)
   const [importError, setImportError] = useState<string | undefined>(undefined)
+  // Instance removal is destructive and irreversible (it tears down the
+  // route and leaves the credential orphaned), so it is a TWO-STEP confirm:
+  // the button arms itself on the first click and disarms after a few
+  // seconds — an accidental click costs nothing, a deliberate one needs one
+  // more tap.
+  const [confirmRemove, setConfirmRemove] = useState(false)
+  useEffect(() => {
+    if (!confirmRemove) return
+    const timer = setTimeout(() => setConfirmRemove(false), 3500)
+    return () => clearTimeout(timer)
+  }, [confirmRemove])
   const paramsRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     paramsRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
@@ -249,6 +266,10 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
   }
 
   const removeModel = (modelIndex: number): void => {
+    // Undoable: the closure keeps this render's pre-removal array, so the
+    // toast's 撤销 restores the row exactly where it was.
+    const before = draft.models
+    const removed = draft.models[modelIndex]
     patch({ models: draft.models.filter((_, at) => at !== modelIndex) })
     setExpanded(current => {
       const next = new Set(current)
@@ -267,6 +288,20 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
       }
       return next
     })
+    if (removed !== undefined) {
+      const label = textOf(removed, 'id').trim() || `${t('models')} ${String(modelIndex + 1)}`
+      notify(t('removedModel').replace('{name}', label), 'undo', () => { patch({ models: before }) })
+    }
+  }
+
+  const removeHeader = (headerIndex: number): void => {
+    const before = draft.headers
+    const removed = draft.headers[headerIndex]
+    patch({ headers: draft.headers.filter((_, at) => at !== headerIndex) })
+    if (removed !== undefined) {
+      const label = removed.name.trim() || `${t('headerName')} ${String(headerIndex + 1)}`
+      notify(t('removedHeader').replace('{name}', label), 'undo', () => { patch({ headers: before }) })
+    }
   }
 
   const toggleExpanded = (modelIndex: number): void => {
@@ -482,8 +517,17 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
       <legend className="newapi-instance-head">
         <span className="newapi-instance-title">{`${t('instanceTitle')} ${String(index + 1)}`}</span>
         <span className="newapi-instance-actions">
-          <button type="button" className="newapi-linkbutton newapi-iconbutton--danger" onClick={onRemove}>
-            {t('removeInstance')}
+          <button
+            type="button"
+            className={`newapi-linkbutton newapi-iconbutton--danger${confirmRemove ? ' newapi-confirm' : ''}`}
+            onClick={() => {
+              // Two-step confirm: the first tap arms the button, the second
+              // (within 3.5s) removes. An accidental click just arms it.
+              if (confirmRemove) onRemove()
+              else setConfirmRemove(true)
+            }}
+          >
+            {confirmRemove ? t('confirmRemove') : t('removeInstance')}
           </button>
         </span>
       </legend>
@@ -677,7 +721,7 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
               type="button" className="newapi-iconbutton newapi-iconbutton--danger"
               aria-label={`${t('removeHeader')} ${String(headerIndex + 1)}`}
               title={t('removeHeader')}
-              onClick={() => { patch({ headers: draft.headers.filter((_, at) => at !== headerIndex) }) }}
+              onClick={() => { removeHeader(headerIndex) }}
             >
               <IconTrash />
             </button>

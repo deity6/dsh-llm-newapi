@@ -53,6 +53,7 @@ import type {
   WireError,
   WireModelList,
 } from './types.ts'
+import { defaultReasoningEffortsFor } from './efforts.ts'
 
 /** Prefix for adapter-raised diagnostics. */
 export const PKG = 'llm-newapi'
@@ -555,6 +556,15 @@ export class NewApiAdapter extends LlmAdapter {
     const connection = this.config.options()
     const configured = connection.models.find(entry => entry.id === model)
     const defaultMaxTokens = configured?.maxTokens ?? connection.maxTokens
+    // Reasoning efforts: catalog facts win; a row without them gets a
+    // family-based guess (most gateway listings are bare ids) so the picker
+    // still offers levels. The guess is runtime-only — never written back.
+    const guessed = configured?.reasoningEfforts !== undefined && configured.reasoningEfforts.length > 0
+      ? undefined
+      : defaultReasoningEffortsFor(model)
+    const efforts = configured?.reasoningEfforts !== undefined && configured.reasoningEfforts.length > 0
+      ? configured.reasoningEfforts
+      : guessed?.efforts
     return Promise.resolve({
       // The chat-completions wire route is text-only regardless of catalog
       // membership, so the uncatalogued fallback declares the same negative
@@ -569,20 +579,29 @@ export class NewApiAdapter extends LlmAdapter {
       // and an explicit effort rides the wire as `reasoning_effort`. The
       // default is the row's configured preset, falling back to the highest
       // rung the catalog declared (max > xhigh > high > medium > low > …), so
-      // switching into reasoning mode selects a level automatically. Rows
-      // without the fact keep declaring nothing — an explicit effort then
-      // rejects before provider I/O, same as before.
-      ...configured?.reasoningEfforts !== undefined && configured.reasoningEfforts.length > 0
+      // switching into reasoning mode selects a level automatically. A row
+      // WITHOUT the fact gets a family-based guess (`defaultReasoningEffortsFor`)
+      // — most gateway listings are bare ids, and without the guess the picker
+      // would offer nothing at all. The guess is runtime-only: it never
+      // rewrites the stored catalog, so a user's own models.dev data or
+      // hand-edited efforts always win. Unknown families keep declaring
+      // nothing, same as before.
+      ...efforts !== undefined && efforts.length > 0
         ? {
           reasoning: {
-            efforts: configured.reasoningEfforts.map(effort => ({
+            efforts: efforts.map(effort => ({
               id: ReasoningEffortId(effort),
               name: effort.charAt(0).toUpperCase() + effort.slice(1),
             })),
-            ...configured.defaultReasoningEffort !== undefined
+            ...configured?.defaultReasoningEffort !== undefined
+              && configured.reasoningEfforts !== undefined
               && configured.reasoningEfforts.includes(configured.defaultReasoningEffort)
               ? { defaultEffort: ReasoningEffortId(configured.defaultReasoningEffort) }
-              : { defaultEffort: ReasoningEffortId(highestEffort(configured.reasoningEfforts)) },
+              : guessed !== undefined
+                ? { defaultEffort: ReasoningEffortId(guessed.defaultEffort) }
+                : configured?.reasoningEfforts !== undefined && configured.reasoningEfforts.length > 0
+                  ? { defaultEffort: ReasoningEffortId(highestEffort(configured.reasoningEfforts)) }
+                  : {},
           },
         }
         : {},

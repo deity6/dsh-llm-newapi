@@ -6,7 +6,7 @@
  * A pre-0.9.0 flat section value (top-level `baseURL`/`models`/`proxy`)
  * loads as one `default` instance so nothing breaks on upgrade.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-client-connection/client'
 import { DEFAULT_PROXY_URL, InstanceEditor, sanitizeClientId, clientRefOf, headersToList, headersToRecord } from './InstanceEditor.tsx'
@@ -187,7 +187,29 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   /** Pending per-instance keys to store on Save: ref → value. */
   const [pendingKeys, setPendingKeys] = useState<ReadonlyMap<string, string>>(new Map())
   const [busy, setBusy] = useState(false)
-  const [notice, setNotice] = useState<string | undefined>(undefined)
+
+  /**
+   * Transient toasts: the differentiated feedback surface (task 2). Success
+   * reads as a green "applied live" pill, deletions as an undo pill, errors
+   * inline where they happen. Toasts self-dismiss; undo ones linger longer
+   * and carry the restore action.
+   */
+  interface Toast {
+    id: number
+    kind: 'ok' | 'info' | 'undo'
+    text: string
+    onUndo?: () => void
+  }
+  const [toasts, setToasts] = useState<readonly Toast[]>([])
+  const toastSeq = useRef(0)
+  const dismissToast = (id: number): void => {
+    setToasts(current => current.filter(toast => toast.id !== id))
+  }
+  const pushToast = (text: string, kind: Toast['kind'], onUndo?: () => void): void => {
+    const id = ++toastSeq.current
+    setToasts(current => [...current, { id, kind, text, ...onUndo === undefined ? {} : { onUndo } }])
+    setTimeout(() => dismissToast(id), kind === 'undo' ? 6000 : 3500)
+  }
 
   const load = async (): Promise<void> => {
     setStatus('loading')
@@ -290,11 +312,20 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
 
   const instanceProblem = (): string | undefined => {
     const seen = new Set<string>()
+    const names = new Set<string>()
     for (const [index, draft] of instances.entries()) {
       const id = sanitizeClientId(draft.id)
       if (draft.id.trim().length === 0) return `${t('instanceIdRequired')} (${t('instanceTitle')} ${String(index + 1)})`
       if (seen.has(id)) return `${t('instanceIdDuplicate')} (${id})`
       seen.add(id)
+      // The display name doubles as the provider label in the model picker
+      // and the catalog group title — two gateways wearing the same label
+      // are indistinguishable there, so refuse the duplicate.
+      const name = draft.displayName.trim()
+      if (name.length > 0) {
+        if (names.has(name)) return `${t('instanceNameDuplicate')} (${name})`
+        names.add(name)
+      }
       // A model row must carry an id, and no two rows may share one: an
       // id-less row would serialize to a catalog entry the adapter rejects
       // at resolve time, so the save is refused here instead.
@@ -318,7 +349,6 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       return
     }
     setBusy(true)
-    setNotice(undefined)
     setErrorText(undefined)
     try {
       const ops: SettingsPathOpView[] = [{
@@ -340,7 +370,10 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
         }
       }
       setPendingKeys(new Map())
-      setNotice(t('saved'))
+      // Success reads as a toast, not an inline line: the section's dsh
+      // settings write applies immediately (instances/keys/proxy are read
+      // per request), so the pill states that fact and no restart is implied.
+      pushToast(`${t('saved')} · ${t('appliedImmediate')}`, 'ok')
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : String(error))
     } finally {
@@ -361,7 +394,6 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   return (
     <section aria-label={t('nav')}>
       <p>{t('intro')}</p>
-      {notice === undefined ? null : <p role="status">{notice}</p>}
       {!writable ? <p>{t('readOnly')}</p> : null}
       {errorText === undefined ? null : <p className="newapi-error">{errorText}</p>}
 
@@ -418,6 +450,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
           onPatch={(patch) => { patchInstance(safeActiveIndex, patch) }}
           onPendingKey={(value) => { handlePendingKey(safeActiveIndex, value) }}
           onRemove={() => { removeInstance(safeActiveIndex) }}
+          notify={pushToast}
         />
       )}
 
@@ -426,6 +459,24 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       <button type="button" className="newapi-button newapi-button--primary" disabled={busy || !writable} onClick={() => { void save() }}>
         {busy ? t('applying') : t('apply')}
       </button>
+
+      {toasts.length === 0 ? null : (
+        <div className="newapi-toasts" role="status" aria-live="polite">
+          {toasts.map(toast => (
+            <div key={toast.id} className={`newapi-toast newapi-toast--${toast.kind}`}>
+              <span className="newapi-toast-text">{toast.text}</span>
+              {toast.onUndo === undefined ? null : (
+                <button
+                  type="button" className="newapi-toast-undo"
+                  onClick={() => { toast.onUndo?.(); dismissToast(toast.id) }}
+                >
+                  {t('undo')}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   )
 }

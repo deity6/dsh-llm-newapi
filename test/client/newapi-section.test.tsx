@@ -129,7 +129,10 @@ describe('environment-supplied credential (read-only)', () => {
 
     await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
     expect(api.credentials.set).not.toHaveBeenCalled()
-    await waitFor(() => { expect(screen.getByText(t('saved'))).toBeTruthy() })
+    // Success surfaces as a toast pill stating the save and the live apply.
+    await waitFor(() => {
+      expect(screen.getByRole('status').textContent).toContain(t('saved'))
+    })
   })
 })
 
@@ -313,5 +316,54 @@ describe('model catalog', () => {
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(screen.getByText(new RegExp(t('modelIdRequired')))).toBeTruthy() })
     expect(api.settings.mutate).not.toHaveBeenCalled()
+  })
+})
+
+describe('humanized deletion and validation (v0.9.8)', () => {
+  it('refuses a save when two instances share a display name', async () => {
+    const api = wireFace({
+      describeAnswer: {
+        writable: true,
+        hasDocument: true,
+        namespaces: [{
+          ns: 'llm-newapi',
+          schema: {},
+          value: { instances: [{ id: 'a', displayName: 'dup' }, { id: 'b', displayName: 'dup' }] },
+          applies: 'live',
+          secrets: [],
+          revision: 7,
+        }],
+      },
+    })
+    render(<NewApiSection api={api as never} t={t} />)
+    await waitFor(() => { expect(screen.getByText(t('apply'))).toBeTruthy() })
+    fireEvent.click(screen.getByText(t('apply')))
+    await waitFor(() => { expect(screen.getByText(/Duplicate provider name/)).toBeTruthy() })
+    expect(api.settings.mutate).not.toHaveBeenCalled()
+  })
+
+  it('removes the instance only after the two-step confirm', async () => {
+    const api = wireFace()
+    render(<NewApiSection api={api as never} t={t} />)
+    await waitFor(() => { expect(screen.getByText(t('removeInstance'))).toBeTruthy() })
+    // First tap arms the button; the card is still there.
+    fireEvent.click(screen.getByText(t('removeInstance')))
+    expect(screen.getByText(t('confirmRemove'))).toBeTruthy()
+    expect(screen.queryByText(t('noInstances'))).toBeNull()
+    // Second tap (within the arm window) actually removes it.
+    fireEvent.click(screen.getByText(t('confirmRemove')))
+    await waitFor(() => { expect(screen.getByText(t('noInstances'))).toBeTruthy() })
+  })
+
+  it('removes a model row with an undo toast that restores it', async () => {
+    const api = wireFace()
+    render(<NewApiSection api={api as never} t={t} />)
+    await waitFor(() => { expect(screen.getByLabelText(`${t('modelId')} 1`)).toBeTruthy() })
+    fireEvent.click(screen.getByLabelText(`${t('removeModel')} 1`))
+    await waitFor(() => { expect(screen.getByText(t('undo'))).toBeTruthy() })
+    expect(screen.queryByLabelText(`${t('modelId')} 1`)).toBeNull()
+    // 撤销 restores the row exactly where it was.
+    fireEvent.click(screen.getByText(t('undo')))
+    await waitFor(() => { expect(screen.getByLabelText(`${t('modelId')} 1`)).toBeTruthy() })
   })
 })
