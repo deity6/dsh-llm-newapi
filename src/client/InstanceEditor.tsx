@@ -197,20 +197,20 @@ export interface InstanceEditorProps {
   probe: (
     request: ProbeRequest,
   ) => Promise<{ ok: true; value: ProbeResult } | { ok: false; error: { message: string } }>
-  parseChannelConn: (
-    blob: unknown,
-  ) => Promise<{ ok: true; value: ParsedChannelConn } | { ok: false; error: { message: string } }>
   /** Persist a draft field change up. */
   onPatch: (patch: Partial<InstanceDraft>) => void
   /** Lift the pending key draft up (empty string = nothing to store). */
   onPendingKey: (value: string) => void
-  onRemove: () => void
+  /** Ask the parent to open the big-window deletion confirm. */
+  onRequestRemove: () => void
   /**
    * Transient feedback from inside the card: a toast with an optional undo
-   * action (used by row removals — the instance removal is a two-step
-   * confirm instead, so it never needs an undo).
+   * action. Instance removal goes through the big confirm dialog instead of
+   * an undo; row removals (models/headers) use the undo pill when enabled.
    */
   notify: (text: string, kind: 'ok' | 'info' | 'undo', onUndo?: () => void) => void
+  /** Whether undo pills are enabled at all (global setting). */
+  undoEnabled: boolean
 }
 
 /**
@@ -220,7 +220,7 @@ export interface InstanceEditorProps {
  * @returns the card.
  */
 export function InstanceEditor(props: InstanceEditorProps): ReactNode {
-  const { index, draft, keyConfigured, keyLocked, api, t, fetchModelParams, probe, parseChannelConn, onPatch, onPendingKey, onRemove, notify } = props
+  const { index, draft, keyConfigured, keyLocked, api, t, fetchModelParams, probe, onPatch, onPendingKey, onRequestRemove, notify, undoEnabled } = props
   const [keyDraft, setKeyDraft] = useState('')
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set())
   const [editing, setEditing] = useState<ReadonlyMap<string, string>>(new Map())
@@ -236,21 +236,9 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
   const [probeResult, setProbeResult] = useState<ProbeResult | undefined>(undefined)
   const [probeWithChat, setProbeWithChat] = useState(false)
   const [probeWithTool, setProbeWithTool] = useState(false)
-  const [importOpen, setImportOpen] = useState(false)
-  const [importText, setImportText] = useState('')
-  const [importBusy, setImportBusy] = useState(false)
-  const [importError, setImportError] = useState<string | undefined>(undefined)
-  // Instance removal is destructive and irreversible (it tears down the
-  // route and leaves the credential orphaned), so it is a TWO-STEP confirm:
-  // the button arms itself on the first click and disarms after a few
-  // seconds — an accidental click costs nothing, a deliberate one needs one
-  // more tap.
-  const [confirmRemove, setConfirmRemove] = useState(false)
-  useEffect(() => {
-    if (!confirmRemove) return
-    const timer = setTimeout(() => setConfirmRemove(false), 3500)
-    return () => clearTimeout(timer)
-  }, [confirmRemove])
+  // Model rows fade out before they leave the DOM (delete animation); the
+  // undo snapshot is captured at click time, so a late undo still restores.
+  const [leavingRows, setLeavingRows] = useState<ReadonlySet<number>>(new Set())
   const paramsRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     paramsRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
@@ -267,30 +255,48 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
 
   const removeModel = (modelIndex: number): void => {
     // Undoable: the closure keeps this render's pre-removal array, so the
-    // toast's 撤销 restores the row exactly where it was.
+    // toast's 撤销 restores the row exactly where it was. The row fades out
+    // first; the actual removal lands after the animation.
     const before = draft.models
     const removed = draft.models[modelIndex]
-    patch({ models: draft.models.filter((_, at) => at !== modelIndex) })
-    setExpanded(current => {
-      const next = new Set(current)
-      next.delete(modelIndex)
-      const shifted = new Set<number>()
-      for (const key of next) shifted.add(key > modelIndex ? key - 1 : key)
-      return shifted
-    })
-    setEditing(current => {
-      const next = new Map<string, string>()
-      for (const [key, value] of current) {
-        const [at, field] = key.split(':')
-        const atNum = Number(at)
-        if (atNum === modelIndex) continue
-        next.set(`${String(atNum > modelIndex ? atNum - 1 : atNum)}:${field}`, value)
-      }
-      return next
-    })
+    const applyRemoval = (): void => {
+      setLeavingRows(current => {
+        const next = new Set(current)
+        next.delete(modelIndex)
+        return next
+      })
+      patch({ models: draft.models.filter((_, at) => at !== modelIndex) })
+      setExpanded(current => {
+        const next = new Set(current)
+        next.delete(modelIndex)
+        const shifted = new Set<number>()
+        for (const key of next) shifted.add(key > modelIndex ? key - 1 : key)
+        return shifted
+      })
+      setEditing(current => {
+        const next = new Map<string, string>()
+        for (const [key, value] of current) {
+          const [at, field] = key.split(':')
+          const atNum = Number(at)
+          if (atNum === modelIndex) continue
+          next.set(`${String(atNum > modelIndex ? atNum - 1 : atNum)}:${field}`, value)
+        }
+        return next
+      })
+    }
+    if (removed !== undefined && !leavingRows.has(modelIndex)) {
+      setLeavingRows(current => new Set(current).add(modelIndex))
+      setTimeout(applyRemoval, 220)
+    } else {
+      applyRemoval()
+    }
     if (removed !== undefined) {
       const label = textOf(removed, 'id').trim() || `${t('models')} ${String(modelIndex + 1)}`
-      notify(t('removedModel').replace('{name}', label), 'undo', () => { patch({ models: before }) })
+      if (undoEnabled) {
+        notify(t('removedModel').replace('{name}', label), 'undo', () => { patch({ models: before }) })
+      } else {
+        notify(t('removedModel').replace('{name}', label), 'info')
+      }
     }
   }
 
@@ -300,7 +306,11 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
     patch({ headers: draft.headers.filter((_, at) => at !== headerIndex) })
     if (removed !== undefined) {
       const label = removed.name.trim() || `${t('headerName')} ${String(headerIndex + 1)}`
-      notify(t('removedHeader').replace('{name}', label), 'undo', () => { patch({ headers: before }) })
+      if (undoEnabled) {
+        notify(t('removedHeader').replace('{name}', label), 'undo', () => { patch({ headers: before }) })
+      } else {
+        notify(t('removedHeader').replace('{name}', label), 'info')
+      }
     }
   }
 
@@ -483,35 +493,6 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
     }
   }
 
-  const runImport = async (): Promise<void> => {
-    setImportBusy(true)
-    setImportError(undefined)
-    try {
-      let blob: unknown
-      try {
-        blob = JSON.parse(importText)
-      } catch {
-        setImportError(t('importInvalidJson'))
-        return
-      }
-      const response = await parseChannelConn(blob)
-      if (!response.ok) {
-        setImportError(response.error.message)
-        return
-      }
-      const value = response.value
-      patch({ baseURL: value.baseURL })
-      setKeyDraft(value.apiKey)
-      onPendingKey(value.apiKey)
-      setImportOpen(false)
-      setImportText('')
-      setNotice(t('importApplied'))
-      void runProbe({ baseURL: value.baseURL, apiKey: value.apiKey })
-    } finally {
-      setImportBusy(false)
-    }
-  }
-
   return (
     <fieldset className="newapi-instance">
       <legend className="newapi-instance-head">
@@ -519,15 +500,12 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
         <span className="newapi-instance-actions">
           <button
             type="button"
-            className={`newapi-linkbutton newapi-iconbutton--danger${confirmRemove ? ' newapi-confirm' : ''}`}
-            onClick={() => {
-              // Two-step confirm: the first tap arms the button, the second
-              // (within 3.5s) removes. An accidental click just arms it.
-              if (confirmRemove) onRemove()
-              else setConfirmRemove(true)
-            }}
+            className="newapi-iconbutton newapi-iconbutton--danger"
+            aria-label={t('removeInstance')}
+            title={t('removeInstance')}
+            onClick={onRequestRemove}
           >
-            {confirmRemove ? t('confirmRemove') : t('removeInstance')}
+            <IconTrash />
           </button>
         </span>
       </legend>
@@ -588,59 +566,37 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
           >
             {probeBusy ? t('probing') : t('probe')}
           </button>
-          <label className="newapi-probecheck">
-            <input
-              type="checkbox" checked={probeWithChat}
-              aria-label={t('probeWithChat')}
-              onChange={(event) => { setProbeWithChat(event.target.checked) }}
-            />
-            {t('probeWithChat')}
-          </label>
-          <label className="newapi-probecheck">
-            <input
-              type="checkbox" checked={probeWithTool}
-              aria-label={t('probeWithTool')}
-              onChange={(event) => { setProbeWithTool(event.target.checked) }}
-            />
-            {t('probeWithTool')}
-          </label>
           <button
-            type="button" className="newapi-linkbutton"
-            onClick={() => { setImportOpen(current => !current); setImportError(undefined) }}
+            type="button" role="switch" aria-checked={probeWithChat}
+            aria-label={t('probeWithChat')}
+            className={`newapi-switch${probeWithChat ? ' newapi-switch--on' : ''}`}
+            onClick={() => {
+              setProbeWithChat(current => {
+                const next = !current
+                notify(next ? t('probeChatOn') : t('probeChatOff'), 'info')
+                return next
+              })
+            }}
           >
-            {t('importChannelConn')}
+            <span className="newapi-switch-knob" />
           </button>
+          <span className="newapi-probecheck">{t('probeWithChat')}</span>
+          <button
+            type="button" role="switch" aria-checked={probeWithTool}
+            aria-label={t('probeWithTool')}
+            className={`newapi-switch${probeWithTool ? ' newapi-switch--on' : ''}`}
+            onClick={() => {
+              setProbeWithTool(current => {
+                const next = !current
+                notify(next ? t('probeToolOn') : t('probeToolOff'), 'info')
+                return next
+              })
+            }}
+          >
+            <span className="newapi-switch-knob" />
+          </button>
+          <span className="newapi-probecheck">{t('probeWithTool')}</span>
         </div>
-
-        {importOpen ? (
-          <div className="newapi-params" style={{ marginTop: 8 }}>
-            <label className="newapi-modelfield">
-              <span className="newapi-modelfield-label">{t('importHint')}</span>
-              <textarea
-                className="newapi-input" rows={3} spellCheck={false}
-                style={{ width: '100%', resize: 'vertical', fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12 }}
-                value={importText}
-                onChange={(event) => { setImportText(event.target.value); setImportError(undefined) }}
-              />
-            </label>
-            {importError === undefined ? null : <p className="newapi-error">{importError}</p>}
-            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <button
-                type="button" className="newapi-button newapi-button--primary"
-                disabled={importBusy || importText.trim().length === 0}
-                onClick={() => { void runImport() }}
-              >
-                {importBusy ? t('importBusy') : t('importApply')}
-              </button>
-              <button
-                type="button" className="newapi-button"
-                onClick={() => { setImportOpen(false); setImportText(''); setImportError(undefined) }}
-              >
-                {t('fetchCancel')}
-              </button>
-            </div>
-          </div>
-        ) : null}
 
         {probeResult === undefined && !probeBusy ? null : (
           <div className="newapi-probe" aria-live="polite">
@@ -760,6 +716,13 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
               onChange={(event) => {
                 const mode = event.target.value as InstanceProxyMode
                 patch({ proxyMode: mode })
+                const label = mode === 'system'
+                  ? t('proxyModeSystem')
+                  : mode === 'direct' ? t('proxyModeDirect') : t('proxyModeCustom')
+                notify(`${t('proxyMode')} → ${label}`, 'info')
+                if (mode === 'custom' && draft.proxyUrl.trim().length === 0) {
+                  notify(t('proxyCustomNeedsUrl'), 'info')
+                }
               }}
             >
               <option value="system">{t('proxyModeSystem')}</option>
@@ -778,7 +741,7 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
         </div>
         {draft.models.length === 0 ? <p className="newapi-empty">{t('modelsEmpty')}</p> : null}
         {draft.models.map((model, modelIndex) => (
-          <div key={modelIndex} className="newapi-entry">
+          <div key={modelIndex} className={`newapi-entry${leavingRows.has(modelIndex) ? ' newapi-entry--leaving' : ''}`}>
             <div className="newapi-modelrow">
               <input
                 className="newapi-input" type="text" value={textOf(model, 'id')}

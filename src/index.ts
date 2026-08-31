@@ -213,6 +213,22 @@ export interface Config {
    * instance and carry this block along.
    */
   headers?: Record<string, string>
+  /**
+   * Global (non-instance) UI preferences — the undo-pill window and toggle.
+   * The host adapter never reads these; they round-trip through the schema so
+   * the settings page can persist them.
+   */
+  ui?: NewApiUiSettings
+}
+
+/**
+ * Global (non-instance) UI preferences — the undo-pill window and toggle.
+ * The host adapter never reads these; they round-trip through the schema so
+ * the settings page can persist them alongside the instances.
+ */
+export interface NewApiUiSettings {
+  undoMs?: number
+  undoEnabled?: boolean
 }
 
 /** How an instance's gateway traffic reaches the network. */
@@ -393,6 +409,10 @@ export const Config: z<Config> = z.object({
   }),
   retryPolicy: RetryPolicySchema,
   headers: z.dict(z.string()).default({}),
+  ui: z.object({
+    undoMs: z.number().step(500).min(1000).max(60000).default(7000),
+    undoEnabled: z.boolean().default(true),
+  }).default({ undoMs: 7000, undoEnabled: true }),
 })
 
 /**

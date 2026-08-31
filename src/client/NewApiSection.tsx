@@ -35,6 +35,11 @@ export interface NewApiSectionProps {
   parseChannelConn: (
     blob: unknown,
   ) => Promise<{ ok: true; value: ParsedChannelConn } | { ok: false; error: { message: string } }>
+  /**
+   * Debounced auto-save on every draft change (default true). Tests disable
+   * it so a deferred write never races their assertions.
+   */
+  autoSave?: boolean
 }
 
 const NS = 'llm-newapi'
@@ -172,7 +177,7 @@ function serializeInstance(draft: InstanceDraft): Record<string, unknown> {
  * @returns the section.
  */
 export function NewApiSection(props: NewApiSectionProps): ReactNode {
-  const { api, t, fetchModelParams, probe, parseChannelConn } = props
+  const { api, t, fetchModelParams, probe, parseChannelConn, autoSave = true } = props
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [errorText, setErrorText] = useState<string | undefined>(undefined)
   const [revision, setRevision] = useState<number>(0)
@@ -187,17 +192,33 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   /** Pending per-instance keys to store on Save: ref → value. */
   const [pendingKeys, setPendingKeys] = useState<ReadonlyMap<string, string>>(new Map())
   const [busy, setBusy] = useState(false)
+  // Configuration page vs global-settings page (gear): the two panels slide
+  // into each other; the gear hosts undo prefs and the channel-import action.
+  const [page, setPage] = useState<'config' | 'settings'>('config')
+  // Global (non-instance) settings, persisted in the section's `ui` block.
+  const [ui, setUi] = useState({ undoMs: 7000, undoEnabled: true })
+  // Big-window confirm for instance deletion (destructive: tears the route).
+  const [confirmRemoveIndex, setConfirmRemoveIndex] = useState(-1)
+  const [confirmRemoveLeaving, setConfirmRemoveLeaving] = useState(false)
+  // Import (moved into the settings page): raw descriptor + busy + error.
+  const [importText, setImportText] = useState('')
+  const [importBusy, setImportBusy] = useState(false)
+  const [importError, setImportError] = useState<string | undefined>(undefined)
+  // Save state machine: clean → dirty (auto-save armed) → saving → saved.
+  const [saveState, setSaveState] = useState<'clean' | 'dirty' | 'saving' | 'saved'>('clean')
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   /**
-   * Transient toasts: the differentiated feedback surface (task 2). Success
-   * reads as a green "applied live" pill, deletions as an undo pill, errors
-   * inline where they happen. Toasts self-dismiss; undo ones linger longer
-   * and carry the restore action.
+   * Transient toasts: the differentiated feedback surface. Success reads as
+   * a green "applied live" pill, deletions as an undo pill, errors inline
+   * where they happen. Toasts self-dismiss with a fade-out; undo pills
+   * linger for the configured (and toggleable) duration.
    */
   interface Toast {
     id: number
     kind: 'ok' | 'info' | 'undo'
     text: string
+    leaving?: boolean
     onUndo?: () => void
   }
   const [toasts, setToasts] = useState<readonly Toast[]>([])
@@ -208,8 +229,17 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   const pushToast = (text: string, kind: Toast['kind'], onUndo?: () => void): void => {
     const id = ++toastSeq.current
     setToasts(current => [...current, { id, kind, text, ...onUndo === undefined ? {} : { onUndo } }])
-    setTimeout(() => dismissToast(id), kind === 'undo' ? 6000 : 3500)
+    // Fade out before removal: mark leaving 250ms early, then drop it.
+    const total = kind === 'undo' && ui.undoEnabled ? ui.undoMs : kind === 'undo' ? 4000 : 3500
+    setTimeout(() => {
+      setToasts(current => current.map(toast => toast.id === id ? { ...toast, leaving: true } : toast))
+    }, Math.max(0, total - 250))
+    setTimeout(() => dismissToast(id), total)
   }
+  // Unmount safety: drop pending auto-save + toast timers.
+  useEffect(() => () => {
+    if (autoSaveTimer.current !== undefined) clearTimeout(autoSaveTimer.current)
+  }, [])
 
   const load = async (): Promise<void> => {
     setStatus('loading')
@@ -232,6 +262,12 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       const drafts = toDrafts(section.value)
       setInstances(drafts)
       setPendingKeys(new Map())
+      // Global (non-instance) UI prefs live in the section's `ui` block.
+      const raw = (section.value as { ui?: { undoMs?: unknown; undoEnabled?: unknown } } | null)?.ui
+      setUi({
+        undoMs: typeof raw?.undoMs === 'number' && Number.isFinite(raw.undoMs) ? raw.undoMs : 7000,
+        undoEnabled: typeof raw?.undoEnabled === 'boolean' ? raw.undoEnabled : true,
+      })
       const refs = drafts.map(draft => clientRefOf(draft.id))
       if (refs.length > 0) {
         const credential = await api.credentials.describe({ refs })
@@ -277,6 +313,16 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
 
   const patchInstance = (index: number, patch: Partial<InstanceDraft>): void => {
     setInstances(current => current.map((draft, at) => at === index ? { ...draft, ...patch } : draft))
+    markDirty()
+  }
+
+  // Any functional edit arms the debounced auto-save and flags the toolbar
+  // state; the manual Save button flushes immediately.
+  const markDirty = (): void => {
+    setSaveState('dirty')
+    if (autoSaveTimer.current !== undefined) clearTimeout(autoSaveTimer.current)
+    if (!autoSave) return
+    autoSaveTimer.current = setTimeout(() => { void save(true) }, 1500)
   }
 
   const removeInstance = (index: number): void => {
@@ -286,6 +332,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       if (index === current) return current   // the active tab closed: the next
       return current                          // slides into this position
     })
+    markDirty()
   }
 
   // Append a new instance with a fresh unique id and switch to it, so the
@@ -298,6 +345,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     const newId = `newapi-${String(n)}`
     setInstances(current => [...current, { ...blankDraft(), id: newId, displayName: '' }])
     setActiveIndex(instances.length) // pre-append length = the new tab's index
+    markDirty()
   }
 
   const handlePendingKey = (index: number, value: string): void => {
@@ -308,6 +356,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       else next.set(ref, value)
       return next
     })
+    markDirty()
   }
 
   const instanceProblem = (): string | undefined => {
@@ -342,23 +391,31 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     return undefined
   }
 
-  const save = async (): Promise<void> => {
+  const save = async (fromAuto = false): Promise<void> => {
     const problem = instanceProblem()
     if (problem !== undefined) {
       setErrorText(problem)
+      if (fromAuto) setSaveState('dirty')
       return
     }
+    if (autoSaveTimer.current !== undefined) clearTimeout(autoSaveTimer.current)
     setBusy(true)
+    setSaveState('saving')
     setErrorText(undefined)
     try {
       const ops: SettingsPathOpView[] = [{
         op: 'set',
         path: ['instances'],
         value: instances.map(serializeInstance),
+      }, {
+        op: 'set',
+        path: ['ui'],
+        value: ui,
       }]
       const mutated = await api.settings.mutate({ ns: NS, ops, expectedRevision: revision })
       if (!mutated.result.ok) {
         setErrorText(mutated.result.error.message)
+        if (fromAuto) setSaveState('dirty')
         return
       }
       setRevision(mutated.result.value.revision)
@@ -366,18 +423,58 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
         const stored = await api.credentials.set({ ref, value: value.trim() })
         if (!stored.result.ok) {
           setErrorText(stored.result.error.message)
+          if (fromAuto) setSaveState('dirty')
           return
         }
       }
       setPendingKeys(new Map())
-      // Success reads as a toast, not an inline line: the section's dsh
-      // settings write applies immediately (instances/keys/proxy are read
-      // per request), so the pill states that fact and no restart is implied.
-      pushToast(`${t('saved')} · ${t('appliedImmediate')}`, 'ok')
+      // Manual saves toast; the debounced auto-save stays quiet (the toolbar
+      // state pill already said 已保存). Both confirm the write applied live.
+      if (!fromAuto) pushToast(`${t('saved')} · ${t('appliedImmediate')}`, 'ok')
+      setSaveState('saved')
+      setTimeout(() => {
+        setSaveState(current => current === 'saved' ? 'clean' : current)
+      }, 2000)
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : String(error))
+      setSaveState('dirty')
     } finally {
       setBusy(false)
+    }
+  }
+
+  // Channel-connection import, hosted on the settings page: parse the blob
+  // and append a NEW instance carrying the descriptor's endpoint + key.
+  const runImport = async (): Promise<void> => {
+    setImportBusy(true)
+    setImportError(undefined)
+    try {
+      let blob: unknown
+      try {
+        blob = JSON.parse(importText)
+      } catch {
+        setImportError(t('importInvalidJson'))
+        return
+      }
+      const parsed = await parseChannelConn(blob)
+      if (!parsed.ok) {
+        setImportError(parsed.error.message)
+        return
+      }
+      const value = parsed.value
+      const used = new Set(instances.map(d => d.id))
+      let n = instances.length + 1
+      while (used.has(`newapi-${String(n)}`)) n++
+      const newId = `newapi-${String(n)}`
+      setInstances(current => [...current, { ...blankDraft(), id: newId, displayName: '', baseURL: value.baseURL }])
+      setActiveIndex(instances.length)
+      setPendingKeys(current => new Map(current).set(clientRefOf(newId), value.apiKey))
+      setImportText('')
+      setPage('config')
+      markDirty()
+      pushToast(t('importApplied'), 'ok')
+    } finally {
+      setImportBusy(false)
     }
   }
 
@@ -397,73 +494,212 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       {!writable ? <p>{t('readOnly')}</p> : null}
       {errorText === undefined ? null : <p className="newapi-error">{errorText}</p>}
 
-      <div className="newapi-tabs" role="tablist" aria-label={t('instanceTabs')}>
-        {instances.map((draft, index) => {
-          const isActive = index === safeActiveIndex
-          const label = draft.displayName.trim().length > 0
-            ? draft.displayName
-            : (draft.id.trim().length > 0 ? draft.id : `${t('instanceTitle')} ${String(index + 1)}`)
-          return (
-            <button
-              key={`tab-${String(index)}`}
-              type="button"
-              role="tab"
-              aria-selected={isActive}
-              className={`newapi-tab ${isActive ? 'newapi-tabActive' : ''}`}
-              onClick={() => { setActiveIndex(index) }}
-            >
-              <span className="newapi-tabLabel">{label}</span>
-            </button>
-          )
-        })}
-        <button
-          type="button"
-          className="newapi-tab newapi-tabAdd"
-          title={t('addInstance')}
-          onClick={addInstance}
-        >
-          +
-        </button>
+      {/* Toolbar: config ⇄ settings pages, live save state, manual save. */}
+      <div className="newapi-toolbar">
+        <div className="newapi-toolbar-tabs" role="tablist" aria-label={t('nav')}>
+          <button
+            type="button" role="tab" aria-selected={page === 'config'}
+            className={`newapi-toolbar-tab${page === 'config' ? ' newapi-toolbar-tabActive' : ''}`}
+            onClick={() => { setPage('config') }}
+          >
+            <span className="newapi-toolbar-ico newapi-toolbar-ico--cards" aria-hidden />
+            {t('configPage')}
+          </button>
+          <button
+            type="button" role="tab" aria-selected={page === 'settings'}
+            className={`newapi-toolbar-tab${page === 'settings' ? ' newapi-toolbar-tabActive' : ''}`}
+            onClick={() => { setPage('settings') }}
+          >
+            <span className="newapi-toolbar-ico newapi-toolbar-ico--gear" aria-hidden />
+            {t('settingsPage')}
+          </button>
+        </div>
+        <div className="newapi-toolbar-right">
+          <span className={`newapi-savestate${saveState === 'clean' ? ' newapi-savestate--hidden' : ''} newapi-savestate--${saveState}`}>
+            {saveState === 'dirty' ? t('unsaved') : saveState === 'saving' ? t('saving') : t('savedLive')}
+          </span>
+          <button
+            type="button" className="newapi-button newapi-button--primary"
+            disabled={busy || !writable}
+            onClick={() => { void save(false) }}
+          >
+            {busy ? t('applying') : t('apply')}
+          </button>
+        </div>
       </div>
 
-      {instances.length === 0 ? (
-        <p className="newapi-empty">{t('noInstances')}</p>
-      ) : activeDraft === undefined ? null : (
-        <InstanceEditor
-          // Keyed by POSITION, not by draft id: the id field is editable, and
-          // a key that changes mid-typing would remount the whole card (losing
-          // focus, the key draft, and expanded rows).
-          key={`instance-${String(safeActiveIndex)}`}
-          index={safeActiveIndex}
-          draft={activeDraft}
-          {...activeCredential === undefined
-            ? { keyLocked: false }
-            : {
-              ...activeCredential.configured === undefined ? {} : { keyConfigured: activeCredential.configured },
-              keyLocked: activeCredential.locked,
-            }}
-          api={api}
-          t={t}
-          fetchModelParams={fetchModelParams}
-          probe={probe}
-          parseChannelConn={parseChannelConn}
-          onPatch={(patch) => { patchInstance(safeActiveIndex, patch) }}
-          onPendingKey={(value) => { handlePendingKey(safeActiveIndex, value) }}
-          onRemove={() => { removeInstance(safeActiveIndex) }}
-          notify={pushToast}
-        />
+      <div className={`newapi-page newapi-page--${page}`}>
+        <div className="newapi-panel">
+          <div className="newapi-tabs" role="tablist" aria-label={t('instanceTabs')}>
+            {instances.map((draft, index) => {
+              const isActive = index === safeActiveIndex
+              const label = draft.displayName.trim().length > 0
+                ? draft.displayName
+                : (draft.id.trim().length > 0 ? draft.id : `${t('instanceTitle')} ${String(index + 1)}`)
+              return (
+                <button
+                  key={`tab-${String(index)}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  className={`newapi-tab ${isActive ? 'newapi-tabActive' : ''}`}
+                  onClick={() => { setActiveIndex(index) }}
+                >
+                  <span className="newapi-tabLabel">{label}</span>
+                </button>
+              )
+            })}
+            <button
+              type="button"
+              className="newapi-tab newapi-tabAdd"
+              title={t('addInstance')}
+              onClick={addInstance}
+            >
+              +
+            </button>
+          </div>
+
+          {instances.length === 0 ? (
+            <p className="newapi-empty">{t('noInstances')}</p>
+          ) : activeDraft === undefined ? null : (
+            <InstanceEditor
+              // Keyed by POSITION, not by draft id: the id field is editable,
+              // and a key that changes mid-typing would remount the whole card.
+              key={`instance-${String(safeActiveIndex)}`}
+              index={safeActiveIndex}
+              draft={activeDraft}
+              {...activeCredential === undefined
+                ? { keyLocked: false }
+                : {
+                  ...activeCredential.configured === undefined ? {} : { keyConfigured: activeCredential.configured },
+                  keyLocked: activeCredential.locked,
+                }}
+              api={api}
+              t={t}
+              fetchModelParams={fetchModelParams}
+              probe={probe}
+              onPatch={(patch) => { patchInstance(safeActiveIndex, patch) }}
+              onPendingKey={(value) => { handlePendingKey(safeActiveIndex, value) }}
+              onRequestRemove={() => { setConfirmRemoveIndex(safeActiveIndex) }}
+              notify={pushToast}
+              undoEnabled={ui.undoEnabled}
+            />
+          )}
+
+          <p className="newapi-hint">{t('modelHint')}</p>
+        </div>
+
+        <div className="newapi-panel">
+          <section className="newapi-settings-block" aria-label={t('settingsPage')}>
+            <div className="newapi-catalog-head">
+              <span className="newapi-catalog-title">{t('settingsUndo')}</span>
+              <button
+                type="button" role="switch" aria-checked={ui.undoEnabled}
+                aria-label={t('settingsUndo')}
+                className={`newapi-switch${ui.undoEnabled ? ' newapi-switch--on' : ''}`}
+                onClick={() => {
+                  setUi(current => {
+                    const next = { ...current, undoEnabled: !current.undoEnabled }
+                    pushToast(next.undoEnabled ? t('undoOn') : t('undoOff'), 'info')
+                    markDirty()
+                    return next
+                  })
+                }}
+              >
+                <span className="newapi-switch-knob" />
+              </button>
+            </div>
+            <label className="newapi-proxylabel">
+              {t('settingsUndoMs')}
+              <input
+                className="newapi-input newapi-select" type="number" min={1000} max={60000} step={500}
+                aria-label={t('settingsUndoMs')}
+                value={ui.undoMs}
+                disabled={!ui.undoEnabled}
+                onChange={(event) => {
+                  const ms = Number(event.target.value)
+                  if (!Number.isFinite(ms) || ms <= 0) return
+                  setUi(current => ({ ...current, undoMs: Math.min(60000, Math.max(1000, ms)) }))
+                  markDirty()
+                }}
+              />
+            </label>
+
+            <div className="newapi-catalog-head" style={{ marginTop: 18 }}>
+              <span className="newapi-catalog-title">{t('importChannelConn')}</span>
+            </div>
+            <p className="newapi-hint">{t('importHint')}</p>
+            <textarea
+              className="newapi-input" rows={3} spellCheck={false}
+              style={{ width: '100%', resize: 'vertical', fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12 }}
+              value={importText}
+              onChange={(event) => { setImportText(event.target.value); setImportError(undefined) }}
+            />
+            {importError === undefined ? null : <p className="newapi-error">{importError}</p>}
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button
+                type="button" className="newapi-button newapi-button--primary"
+                disabled={importBusy || importText.trim().length === 0}
+                onClick={() => { void runImport() }}
+              >
+                {importBusy ? t('importBusy') : t('importApply')}
+              </button>
+              <button
+                type="button" className="newapi-button"
+                onClick={() => { setImportText(''); setImportError(undefined) }}
+              >
+                {t('fetchCancel')}
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      {/* Instance deletion is destructive (route torn down, credential
+          orphaned): a big-window confirm, never an undo. */}
+      {confirmRemoveIndex < 0 ? null : (
+        <div
+          className={`newapi-modal-backdrop${confirmRemoveLeaving ? ' newapi-modal--leaving' : ''}`}
+          onClick={() => { setConfirmRemoveIndex(-1) }}
+        >
+          <div
+            className="newapi-modal" role="dialog" aria-modal="true"
+            aria-label={t('confirmRemoveInstance')}
+            onClick={(event) => { event.stopPropagation() }}
+          >
+            <h3 className="newapi-modal-title">{t('confirmRemoveInstance')}</h3>
+            <p className="newapi-modal-body">
+              {`${t('confirmRemoveInstanceBody')} ${instances[confirmRemoveIndex]?.displayName.trim() || instances[confirmRemoveIndex]?.id || ''}`}
+            </p>
+            <div className="newapi-modal-actions">
+              <button
+                type="button" className="newapi-button"
+                onClick={() => { setConfirmRemoveIndex(-1) }}
+              >
+                {t('fetchCancel')}
+              </button>
+              <button
+                type="button" className="newapi-button newapi-button--danger"
+                onClick={() => {
+                  const index = confirmRemoveIndex
+                  setConfirmRemoveIndex(-1)
+                  setConfirmRemoveLeaving(true)
+                  setTimeout(() => setConfirmRemoveLeaving(false), 200)
+                  removeInstance(index)
+                  pushToast(t('removedInstance'), 'info')
+                }}
+              >
+                {t('confirmRemove')}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
-
-      <p className="newapi-hint">{t('modelHint')}</p>
-
-      <button type="button" className="newapi-button newapi-button--primary" disabled={busy || !writable} onClick={() => { void save() }}>
-        {busy ? t('applying') : t('apply')}
-      </button>
 
       {toasts.length === 0 ? null : (
         <div className="newapi-toasts" role="status" aria-live="polite">
           {toasts.map(toast => (
-            <div key={toast.id} className={`newapi-toast newapi-toast--${toast.kind}`}>
+            <div key={toast.id} className={`newapi-toast newapi-toast--${toast.kind}${toast.leaving === true ? ' newapi-toast--leaving' : ''}`}>
               <span className="newapi-toast-text">{toast.text}</span>
               {toast.onUndo === undefined ? null : (
                 <button

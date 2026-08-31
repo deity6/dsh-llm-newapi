@@ -296,6 +296,93 @@ const SECTION_CSS = `
   font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
 }
 .newapi-toast-undo:hover { background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); }
+.newapi-toast--leaving {
+  opacity: 0; transform: translateY(4px);
+  transition: opacity .2s ease, transform .2s ease;
+}
+/* Toolbar: config ⇄ settings page switch + live save state + manual save. */
+.newapi-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 0; margin-bottom: 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+.newapi-toolbar-tabs { display: flex; gap: 4px; }
+.newapi-toolbar-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border: none; border-radius: 8px;
+  background: transparent; color: var(--dsw-alias-label-tertiary);
+  font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.newapi-toolbar-tab:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.newapi-toolbar-tabActive { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.newapi-toolbar-ico { width: 14px; height: 14px; flex: none; }
+.newapi-toolbar-ico--cards {
+  border: 1.6px solid currentColor; border-radius: 3px;
+  box-shadow: 4px 0 0 -1px currentColor, 4px 4px 0 -1px currentColor, 0 4px 0 -1px currentColor;
+  margin-right: 2px;
+}
+.newapi-toolbar-ico--gear {
+  border-radius: 50%;
+  border: 1.6px solid currentColor;
+  background:
+    radial-gradient(circle at center, currentColor 0 2.4px, transparent 2.6px),
+    conic-gradient(from 0deg, transparent 0 30deg, currentColor 30deg 42deg, transparent 42deg 102deg, currentColor 102deg 114deg, transparent 114deg 174deg, currentColor 174deg 186deg, transparent 186deg 246deg, currentColor 246deg 258deg, transparent 258deg 318deg, currentColor 318deg 330deg, transparent 330deg);
+}
+.newapi-toolbar-right { display: flex; align-items: center; gap: 8px; }
+.newapi-savestate {
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary);
+  opacity: 1; transition: opacity .25s ease;
+}
+.newapi-savestate--hidden { opacity: 0; }
+.newapi-savestate--dirty { color: var(--dsw-alias-state-warn-label); }
+.newapi-savestate--saving { color: var(--dsw-alias-label-tertiary); }
+.newapi-savestate--saved { color: var(--dsw-alias-state-success-primary); }
+/* Sliding pages: the settings panel slides over the config one. */
+.newapi-page { display: flex; overflow: hidden; }
+.newapi-panel { width: 100%; flex: none; transition: transform .24s ease; }
+.newapi-page--settings .newapi-panel { transform: translateX(-100%); }
+/* Big-window confirm modal. */
+.newapi-modal-backdrop {
+  position: fixed; inset: 0; z-index: 900;
+  background: color-mix(in srgb, var(--dsw-specific-menu) 60%, transparent);
+  display: flex; align-items: center; justify-content: center;
+  animation: newapi-backdrop-in .15s ease;
+}
+@keyframes newapi-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+.newapi-modal-backdrop.newapi-modal--leaving { opacity: 0; transition: opacity .2s ease; }
+.newapi-modal {
+  width: min(420px, calc(100vw - 48px));
+  box-sizing: border-box; padding: 18px; border-radius: 14px;
+  background: var(--dsw-specific-menu);
+  border: 1px solid var(--dsw-alias-border-l2);
+  box-shadow: var(--dsw-shadow-lv3);
+  animation: newapi-modal-in .18s ease;
+}
+@keyframes newapi-modal-in { from { opacity: 0; transform: scale(.96) translateY(6px); } to { opacity: 1; transform: none; } }
+.newapi-modal-title { margin: 0 0 8px; font-size: 15px; line-height: 22px; color: var(--dsw-alias-label-primary); }
+.newapi-modal-body { margin: 0 0 16px; font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-secondary); }
+.newapi-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.newapi-button--danger { background: var(--dsw-alias-state-error-primary); color: #fff; }
+.newapi-button--danger:hover:not(:disabled) { background: var(--dsw-alias-state-error-primary); color: #fff; }
+/* Animated switch (probe options, undo toggle). */
+.newapi-switch {
+  box-sizing: border-box; width: 34px; height: 20px; flex: none;
+  border-radius: 999px; border: 1px solid var(--dsw-alias-border-l3);
+  background: var(--dsw-alias-bg-layer-1);
+  cursor: pointer; padding: 0; position: relative;
+  transition: background .18s ease, border-color .18s ease;
+}
+.newapi-switch-knob {
+  position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--dsw-alias-label-tertiary);
+  transition: transform .18s ease, background .18s ease;
+}
+.newapi-switch--on { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
+.newapi-switch--on .newapi-switch-knob { transform: translateX(14px); background: #fff; }
+.newapi-probecheck { font-size: 12px; color: var(--dsw-alias-label-tertiary); line-height: 18px; }
+/* Row delete fade-out. */
+.newapi-entry { transition: opacity .2s ease, transform .2s ease; }
+.newapi-entry--leaving { opacity: 0; transform: translateX(8px); }
 `
 
 /** Required services (cordis fiber inject): the section slot, copy, and the wire face. */

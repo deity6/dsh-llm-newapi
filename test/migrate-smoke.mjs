@@ -13,7 +13,9 @@ const raw = readFileSync('C:/Users/Deity/.dsh/settings.yaml', 'utf8')
 const doc = yaml.parse(raw)
 const section = Config(doc['llm-newapi'] ?? {})
 const entries = instanceEntriesOf(section)
-check('settings.yaml → 3 个实例', entries.length === 3, JSON.stringify(entries.map(e => e.id)))
+check('settings.yaml → ≥3 个实例（含 seekai/justwoker/agentrouter）', entries.length >= 3
+  && ['seekai', 'justwoker', 'agentrouter'].every(id => entries.some(e => e.id === id)),
+JSON.stringify(entries.map(e => e.id)))
 const seekai = entries.find(e => e.id === 'seekai')
 check('实例 seekai 存在', seekai !== undefined)
 if (seekai === undefined) {

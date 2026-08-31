@@ -3,7 +3,7 @@
  * NewApiSection behavior over a scripted wire face. These tests assert
  * user-visible outcomes (fields rendered, calls made) — never React internals.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { NewApiSection } from '../../src/client/NewApiSection.tsx'
 import { en } from '../../src/client/locale.ts'
@@ -80,7 +80,7 @@ function savedModels(api: ReturnType<typeof wireFace>): Array<Record<string, unk
 describe('NewApiSection mount', () => {
   it('loads the section on mount and renders the configuration form', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
 
     // The form fields the user configures the provider through.
     await waitFor(() => { expect(screen.getByLabelText(t('baseUrl'))).toBeTruthy() })
@@ -96,7 +96,7 @@ describe('NewApiSection mount', () => {
 
   it('names the missing namespace when the host has no llm-newapi section', async () => {
     const api = wireFace({ describeAnswer: { writable: true, hasDocument: true, namespaces: [] } })
-    render(<NewApiSection api={api as never} t={t} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
 
     await waitFor(() => { expect(screen.getByText(new RegExp('not registered'))).toBeTruthy() })
     expect(screen.getByText(t('retry'))).toBeTruthy()
@@ -110,7 +110,7 @@ describe('environment-supplied credential (read-only)', () => {
 
   it('locks the key field with the launch-environment placeholder', async () => {
     const api = wireFace({ credentialsAnswer: envCredential })
-    render(<NewApiSection api={api as never} t={t} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
 
     await waitFor(() => { expect(screen.getByLabelText(t('keyInput'))).toBeTruthy() })
     // The official ProviderEditor pattern: writable === false disables the
@@ -121,7 +121,7 @@ describe('environment-supplied credential (read-only)', () => {
 
   it('saves the section without attempting a shadowed credential write', async () => {
     const api = wireFace({ credentialsAnswer: envCredential })
-    render(<NewApiSection api={api as never} t={t} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
 
     await waitFor(() => { expect(screen.getByLabelText(t('baseUrl'))).toBeTruthy() })
     fireEvent.change(screen.getByLabelText(t('baseUrl')), { target: { value: 'http://other:3000/v1' } })
@@ -156,7 +156,7 @@ describe('models.dev params update', () => {
       },
     })
     const fetchModelParams = paramsFace()
-    render(<NewApiSection api={api as never} t={t} fetchModelParams={fetchModelParams as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={fetchModelParams as never} />)
 
     await waitFor(() => { expect(screen.getByText(t('updateParams'))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('updateParams')))
@@ -185,7 +185,7 @@ describe('models.dev params update', () => {
   it('fill-blank mode keeps values the rows already carry', async () => {
     const api = wireFace()
     const fetchModelParams = paramsFace()
-    render(<NewApiSection api={api as never} t={t} fetchModelParams={fetchModelParams as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={fetchModelParams as never} />)
 
     await waitFor(() => { expect(screen.getByText(t('updateParams'))).toBeTruthy() })
     // The fixture row already has contextWindow 65536; blank mode keeps it and only fills maxTokens.
@@ -201,7 +201,7 @@ describe('models.dev params update', () => {
   it('sends the proxy url only in custom mode, and persists the proxy section', async () => {
     const api = wireFace()
     const fetchModelParams = paramsFace()
-    render(<NewApiSection api={api as never} t={t} fetchModelParams={fetchModelParams as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={fetchModelParams as never} />)
 
     // The legacy fixture has no proxy block, so the draft lands in direct
     // mode: params lookups carry no proxyUrl.
@@ -219,7 +219,6 @@ describe('models.dev params update', () => {
     await waitFor(() => { expect(fetchModelParams).toHaveBeenCalledTimes(2) })
     expect(fetchModelParams.mock.calls[1][0].proxyUrl).toBe('http://127.0.0.1:7897')
 
-    fireEvent.click(screen.getByText(t('fetchCancel')))
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
     const proxy = savedSection(api)[0].proxy as Record<string, unknown>
@@ -236,7 +235,7 @@ describe('model catalog', () => {
         value: { models: [{ id: 'zhipu/glm-5.3' }, { id: 'aa-first' }, { id: 'deepseek-chat' }] },
       },
     })
-    render(<NewApiSection api={api as never} t={t} fetchModelParams={paramsFace() as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={paramsFace() as never} />)
 
     await waitFor(() => { expect(screen.getByText(t('fetchModels'))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('fetchModels')))
@@ -257,7 +256,7 @@ describe('model catalog', () => {
 
   it('folds capacities behind the row disclosure and adopts K/M entry', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
 
     await waitFor(() => { expect(screen.getByLabelText(t('baseUrl'))).toBeTruthy() })
     // Capacities are not on the row until its disclosure opens.
@@ -275,7 +274,7 @@ describe('model catalog', () => {
 
   it('drops an emptied name instead of storing an empty string', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
 
     const name = await waitFor(() => screen.getByLabelText(`${t('modelName')} 1`))
     fireEvent.change(name, { target: { value: 'Renamed' } })
@@ -287,7 +286,7 @@ describe('model catalog', () => {
 
   it('clears every row through the clear action and saves an empty catalog', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} fetchModelParams={paramsFace() as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={paramsFace() as never} />)
 
     // The fixture carries one model row; clear removes it and the empty
     // hint appears in its place.
@@ -307,7 +306,7 @@ describe('model catalog', () => {
 
   it('adds a row through the add-model action and refuses a save with an empty id', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
 
     await waitFor(() => { expect(screen.getByText(t('addModel'))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('addModel')))
@@ -335,33 +334,40 @@ describe('humanized deletion and validation (v0.9.8)', () => {
         }],
       },
     })
-    render(<NewApiSection api={api as never} t={t} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
     await waitFor(() => { expect(screen.getByText(t('apply'))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(screen.getByText(/Duplicate provider name/)).toBeTruthy() })
     expect(api.settings.mutate).not.toHaveBeenCalled()
   })
 
-  it('removes the instance only after the two-step confirm', async () => {
+  it('removes the instance only after the big-window confirm', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} />)
-    await waitFor(() => { expect(screen.getByText(t('removeInstance'))).toBeTruthy() })
-    // First tap arms the button; the card is still there.
-    fireEvent.click(screen.getByText(t('removeInstance')))
-    expect(screen.getByText(t('confirmRemove'))).toBeTruthy()
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    await waitFor(() => { expect(screen.getByLabelText(t('removeInstance'))).toBeTruthy() })
+    // The trash button opens the modal; the instance is still there.
+    fireEvent.click(screen.getByLabelText(t('removeInstance')))
+    await waitFor(() => { expect(screen.getByRole('dialog')).toBeTruthy() })
     expect(screen.queryByText(t('noInstances'))).toBeNull()
-    // Second tap (within the arm window) actually removes it.
-    fireEvent.click(screen.getByText(t('confirmRemove')))
+    // Cancelling closes the modal and leaves the instance untouched.
+    fireEvent.click(within(screen.getByRole('dialog')).getByText(t('fetchCancel')))
+    await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull() })
+    expect(screen.queryByText(t('noInstances'))).toBeNull()
+    // Confirming (second tap inside the dialog) actually removes it.
+    fireEvent.click(screen.getByLabelText(t('removeInstance')))
+    await waitFor(() => { expect(screen.getByRole('dialog')).toBeTruthy() })
+    fireEvent.click(within(screen.getByRole('dialog')).getByText(t('confirmRemove')))
     await waitFor(() => { expect(screen.getByText(t('noInstances'))).toBeTruthy() })
   })
 
   it('removes a model row with an undo toast that restores it', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
     await waitFor(() => { expect(screen.getByLabelText(`${t('modelId')} 1`)).toBeTruthy() })
     fireEvent.click(screen.getByLabelText(`${t('removeModel')} 1`))
     await waitFor(() => { expect(screen.getByText(t('undo'))).toBeTruthy() })
-    expect(screen.queryByLabelText(`${t('modelId')} 1`)).toBeNull()
+    // The row fades out (220ms) before it leaves the DOM.
+    await waitFor(() => { expect(screen.queryByLabelText(`${t('modelId')} 1`)).toBeNull() })
     // 撤销 restores the row exactly where it was.
     fireEvent.click(screen.getByText(t('undo')))
     await waitFor(() => { expect(screen.getByLabelText(`${t('modelId')} 1`)).toBeTruthy() })
