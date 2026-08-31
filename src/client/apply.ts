@@ -438,7 +438,7 @@ export function apply(ctx: ClientContext): void {
   if (typeof document !== 'undefined') {
     ctx.effect(() => {
       const element = document.createElement('style')
-      element.textContent = SECTION_CSS
+      element.textContent = SECTION_CSS + '\n' + REFRESH_CSS
       document.head.append(element)
       return () => { element.remove() }
     }, 'llm-newapi: section styles')
@@ -479,3 +479,96 @@ export function apply(ctx: ClientContext): void {
     inject: () => ({ api: connection.api, t, fetchModelParams, probe, parseChannelConn }),
   }, NewApiSection))
 }
+
+/**
+ * CSS for the v0.9.13 design refresh: segmented top control, card-list
+ * navigation, disclosure editing, danger area, and switch rows. Bundled
+ * as a single template so the host stays CSS-light.
+ */
+const REFRESH_CSS = `
+.newapi-shell { display: flex; flex-direction: column; gap: 16px; }
+
+/* ── Segmented top control (sliding thumb) ──────────────────────────── */
+.newapi-seg { position: relative; display: inline-flex; padding: 3px; border-radius: 10px; background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,.04)); user-select: none; }
+.newapi-seg-opt { position: relative; z-index: 1; flex: none; padding: 6px 16px; border: none; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; border-radius: 8px; transition: color .18s ease; }
+.newapi-seg-opt:hover { color: var(--dsw-alias-label-primary); }
+.newapi-seg-opt--active { color: var(--dsw-alias-label-primary, #fff); }
+.newapi-seg-thumb { position: absolute; top: 3px; bottom: 3px; border-radius: 8px; background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff)); box-shadow: 0 1px 3px rgba(0,0,0,.08), 0 0 0 1px rgba(0,0,0,.06); transition: transform .22s cubic-bezier(.4,.0,.2,1), width .22s cubic-bezier(.4,.0,.2,1); pointer-events: none; }
+.newapi-segbar { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 4px 0; flex-wrap: wrap; }
+.newapi-segbar .newapi-btn { flex: none; }
+
+/* ── Card list (图3 风格) ────────────────────────────────────────────── */
+.newapi-cardlist { display: flex; flex-direction: column; gap: 0; border-radius: 12px; background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff)); overflow: hidden; box-shadow: 0 0 0 1px var(--dsw-alias-border-l1, rgba(0,0,0,.06)); }
+.newapi-cardlist--divider > .newapi-card + .newapi-card { border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.06)); }
+.newapi-card { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 16px; border: none; background: transparent; color: inherit; font: inherit; cursor: pointer; text-align: left; width: 100%; transition: background .14s ease; }
+.newapi-card:hover { background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,.03)); }
+.newapi-card:active { background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,.06)); }
+.newapi-card-ico { width: 36px; height: 36px; border-radius: 18px; display: flex; align-items: center; justify-content: center; background: var(--dsw-static-deepseek-50, rgba(94,140,255,.10)); color: var(--dsw-static-deepseek-500, #4a7df9); flex: none; }
+.newapi-card-ico svg { width: 20px; height: 20px; }
+.newapi-card-body { min-width: 0; }
+.newapi-card-title { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.newapi-card-sub { font-size: 12px; color: var(--dsw-alias-label-tertiary); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.newapi-card-trailing { color: var(--dsw-alias-label-tertiary); flex: none; }
+.newapi-card-trailing svg { width: 18px; height: 18px; opacity: .6; }
+.newapi-card-badge { display: inline-flex; min-width: 18px; height: 18px; padding: 0 6px; border-radius: 9px; background: var(--dsw-static-deepseek-500, #4a7df9); color: #fff; font-size: 11px; font-weight: 600; align-items: center; justify-content: center; }
+
+/* ── Section group (设置页) ─────────────────────────────────────────── */
+.newapi-sectiongroup { display: flex; flex-direction: column; gap: 8px; }
+.newapi-sectiongroup-head { padding: 0 4px; font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-tertiary); text-transform: uppercase; letter-spacing: .04em; }
+.newapi-sectiongroup-body { display: flex; flex-direction: column; gap: 0; border-radius: 12px; background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff)); overflow: hidden; box-shadow: 0 0 0 1px var(--dsw-alias-border-l1, rgba(0,0,0,.06)); }
+.newapi-sectiongroup-body > .newapi-row + .newapi-row { border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.06)); }
+
+/* ── Row (设置项 / 图2 风格: 标题+副标题+右侧控件) ─────────────────── */
+.newapi-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 16px; background: transparent; }
+.newapi-row-label { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.newapi-row-sub { font-size: 12px; color: var(--dsw-alias-label-tertiary); margin-top: 2px; }
+.newapi-row-control { flex: none; }
+
+/* ── Disclosure (实例编辑页折叠卡) ──────────────────────────────────── */
+.newapi-disclosure { border-radius: 12px; background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff)); box-shadow: 0 0 0 1px var(--dsw-alias-border-l1, rgba(0,0,0,.06)); overflow: hidden; }
+.newapi-disclosure + .newapi-disclosure { margin-top: 12px; }
+.newapi-disclosure > summary { display: flex; align-items: center; gap: 12px; padding: 12px 16px; cursor: pointer; list-style: none; user-select: none; }
+.newapi-disclosure > summary::-webkit-details-marker { display: none; }
+.newapi-disclosure > summary:hover { background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,.03)); }
+.newapi-disclosure > summary::after { content: ''; width: 8px; height: 8px; margin-left: auto; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg); transition: transform .2s ease; color: var(--dsw-alias-label-tertiary); }
+.newapi-disclosure[open] > summary::after { transform: rotate(-135deg); }
+.newapi-disclosure-title { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.newapi-disclosure-sub { font-size: 12px; color: var(--dsw-alias-label-tertiary); margin-top: 2px; }
+.newapi-disclosure-body { padding: 4px 16px 16px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.06)); }
+
+/* ── Page header with back arrow ────────────────────────────────────── */
+.newapi-pagehead { display: flex; align-items: center; gap: 8px; padding: 4px 0 8px; }
+.newapi-pagehead-back { width: 32px; height: 32px; border-radius: 16px; display: flex; align-items: center; justify-content: center; border: none; background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,.04)); color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.newapi-pagehead-back:hover { background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,.08)); color: var(--dsw-alias-label-primary); }
+.newapi-pagehead-back svg { width: 18px; height: 18px; }
+.newapi-pagehead-title { font-size: 16px; font-weight: 700; color: var(--dsw-alias-label-primary); }
+.newapi-pagehead-spacer { flex: 1; }
+.newapi-pagehead-status { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+
+/* ── Buttons (统一三态) ─────────────────────────────────────────────── */
+.newapi-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 16px; border: none; border-radius: 8px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .14s ease, color .14s ease, transform .08s ease; }
+.newapi-btn:active { transform: scale(.97); }
+.newapi-btn:disabled { opacity: .5; cursor: not-allowed; }
+.newapi-btn svg { width: 16px; height: 16px; }
+.newapi-btn--primary { background: var(--dsw-static-deepseek-500, #4a7df9); color: #fff; }
+.newapi-btn--primary:hover:not(:disabled) { background: var(--dsw-static-deepseek-600, #3567e8); }
+.newapi-btn--ghost { background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,.04)); color: var(--dsw-alias-label-primary); }
+.newapi-btn--ghost:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,.08)); }
+.newapi-btn--danger { background: transparent; color: var(--dsw-alias-state-error-primary); padding: 8px 4px; font-weight: 500; }
+.newapi-btn--danger:hover:not(:disabled) { color: var(--dsw-alias-state-error-secondary, #c33030); background: var(--dsw-alias-state-error-secondary-bg, rgba(220,40,40,.06)); border-radius: 6px; }
+.newapi-btn--lg { padding: 12px 20px; font-size: 14px; }
+
+/* ── Danger area (实例编辑页底部) ──────────────────────────────────── */
+.newapi-danger { margin-top: 24px; padding: 16px; border-radius: 12px; background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff)); box-shadow: 0 0 0 1px var(--dsw-alias-state-error-secondary-bg, rgba(220,40,40,.18)); }
+.newapi-danger-head { font-size: 12px; font-weight: 600; color: var(--dsw-alias-state-error-primary); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+.newapi-danger-body { display: flex; flex-direction: column; gap: 6px; }
+.newapi-danger-hint { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+
+/* ── Empty state ────────────────────────────────────────────────────── */
+.newapi-empty { padding: 32px 16px; text-align: center; }
+.newapi-empty-title { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); margin-bottom: 4px; }
+.newapi-empty-sub { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+
+/* ── Add-instance primary action bar ────────────────────────────────── */
+.newapi-addbar { padding: 8px 0 4px; display: flex; gap: 8px; }
+`

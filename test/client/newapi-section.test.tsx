@@ -80,7 +80,7 @@ function savedModels(api: ReturnType<typeof wireFace>): Array<Record<string, unk
 describe('NewApiSection mount', () => {
   it('loads the section on mount and renders the configuration form', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
 
     // The form fields the user configures the provider through.
     await waitFor(() => { expect(screen.getByLabelText(t('baseUrl'))).toBeTruthy() })
@@ -96,7 +96,7 @@ describe('NewApiSection mount', () => {
 
   it('names the missing namespace when the host has no llm-newapi section', async () => {
     const api = wireFace({ describeAnswer: { writable: true, hasDocument: true, namespaces: [] } })
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
 
     await waitFor(() => { expect(screen.getByText(new RegExp('not registered'))).toBeTruthy() })
     expect(screen.getByText(t('retry'))).toBeTruthy()
@@ -110,7 +110,7 @@ describe('environment-supplied credential (read-only)', () => {
 
   it('locks the key field with the launch-environment placeholder', async () => {
     const api = wireFace({ credentialsAnswer: envCredential })
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
 
     await waitFor(() => { expect(screen.getByLabelText(t('keyInput'))).toBeTruthy() })
     // The official ProviderEditor pattern: writable === false disables the
@@ -121,7 +121,7 @@ describe('environment-supplied credential (read-only)', () => {
 
   it('saves the section without attempting a shadowed credential write', async () => {
     const api = wireFace({ credentialsAnswer: envCredential })
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
 
     await waitFor(() => { expect(screen.getByLabelText(t('baseUrl'))).toBeTruthy() })
     fireEvent.change(screen.getByLabelText(t('baseUrl')), { target: { value: 'http://other:3000/v1' } })
@@ -156,7 +156,7 @@ describe('models.dev params update', () => {
       },
     })
     const fetchModelParams = paramsFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={fetchModelParams as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={fetchModelParams as never} defaultEditIndex={0} />)
 
     await waitFor(() => { expect(screen.getByText(t('updateParams'))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('updateParams')))
@@ -185,7 +185,7 @@ describe('models.dev params update', () => {
   it('fill-blank mode keeps values the rows already carry', async () => {
     const api = wireFace()
     const fetchModelParams = paramsFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={fetchModelParams as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={fetchModelParams as never} defaultEditIndex={0} />)
 
     await waitFor(() => { expect(screen.getByText(t('updateParams'))).toBeTruthy() })
     // The fixture row already has contextWindow 65536; blank mode keeps it and only fills maxTokens.
@@ -201,7 +201,7 @@ describe('models.dev params update', () => {
   it('sends the proxy url only in custom mode, and persists the proxy section', async () => {
     const api = wireFace()
     const fetchModelParams = paramsFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={fetchModelParams as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={fetchModelParams as never} defaultEditIndex={0} />)
 
     // The legacy fixture has no proxy block, so the draft lands in direct
     // mode: params lookups carry no proxyUrl.
@@ -235,7 +235,7 @@ describe('model catalog', () => {
         value: { models: [{ id: 'zhipu/glm-5.3' }, { id: 'aa-first' }, { id: 'deepseek-chat' }] },
       },
     })
-    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={paramsFace() as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={paramsFace() as never} defaultEditIndex={0} />)
 
     await waitFor(() => { expect(screen.getByText(t('fetchModels'))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('fetchModels')))
@@ -256,7 +256,7 @@ describe('model catalog', () => {
 
   it('folds capacities behind the row disclosure and adopts K/M entry', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
 
     await waitFor(() => { expect(screen.getByLabelText(t('baseUrl'))).toBeTruthy() })
     // Capacities are not on the row until its disclosure opens.
@@ -274,7 +274,7 @@ describe('model catalog', () => {
 
   it('drops an emptied name instead of storing an empty string', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
 
     const name = await waitFor(() => screen.getByLabelText(`${t('modelName')} 1`))
     fireEvent.change(name, { target: { value: 'Renamed' } })
@@ -286,7 +286,7 @@ describe('model catalog', () => {
 
   it('clears every row through the clear action and saves an empty catalog', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={paramsFace() as never} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} fetchModelParams={paramsFace() as never} defaultEditIndex={0} />)
 
     // The fixture carries one model row; clear removes it and the empty
     // hint appears in its place.
@@ -306,7 +306,7 @@ describe('model catalog', () => {
 
   it('adds a row through the add-model action and refuses a save with an empty id', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
 
     await waitFor(() => { expect(screen.getByText(t('addModel'))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('addModel')))
@@ -334,7 +334,7 @@ describe('humanized deletion and validation (v0.9.8)', () => {
         }],
       },
     })
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
     await waitFor(() => { expect(screen.getByText(t('apply'))).toBeTruthy() })
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(screen.getByText(/Duplicate provider name/)).toBeTruthy() })
@@ -343,33 +343,34 @@ describe('humanized deletion and validation (v0.9.8)', () => {
 
   it('moves the instance into the recycle bin and restores it from there', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
     await waitFor(() => { expect(screen.getByLabelText(t('removeInstance'))).toBeTruthy() })
     // Deleting moves the instance to the bin (recoverable): no dialog, the
-    // card disappears and the bin badge shows 1.
+    // editor closes back to the config list.
     fireEvent.click(screen.getByLabelText(t('removeInstance')))
-    await waitFor(() => { expect(screen.getByText(t('noInstances'))).toBeTruthy() })
+    await waitFor(() => { expect(screen.getByText(t('emptyInstancesTitle'))).toBeTruthy() })
     // The toast carries the instance label after the fixed prefix.
     await waitFor(() => { expect(screen.getByText(new RegExp(t('movedToTrash')))).toBeTruthy() })
-    // Open the bin: the instance is listed with its gateway address.
-    fireEvent.click(screen.getByLabelText(t('trashTitle')))
-    await waitFor(() => { expect(screen.getByRole('dialog')).toBeTruthy() })
-    expect(screen.getByText(t('trashRestore'))).toBeTruthy()
-    // Restoring puts it back; the panel stays open and turns empty.
+    // Open the bin page: the instance is listed with its gateway address.
+    fireEvent.click(screen.getByText(t('pageTrash')))
+    await waitFor(() => { expect(screen.getByText(t('trashRestore'))).toBeTruthy() })
+    // Restoring puts it back; the bin turns empty and the config list shows
+    // the card again.
     fireEvent.click(screen.getByText(t('trashRestore')))
-    await waitFor(() => { expect(screen.getByText(t('trashEmpty'))).toBeTruthy() })
+    await waitFor(() => { expect(screen.getByText(t('trashEmptyTitle'))).toBeTruthy() })
     expect(screen.getByText(t('restoredInstance'))).toBeTruthy()
-    expect(screen.queryByText(t('noInstances'))).toBeNull()
+    fireEvent.click(screen.getByText(t('pageConfig')))
+    await waitFor(() => { expect(screen.queryByText(t('emptyInstancesTitle'))).toBeNull() })
   })
 
   it('permanently deletes only after the big-window confirm in the bin', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
     await waitFor(() => { expect(screen.getByLabelText(t('removeInstance'))).toBeTruthy() })
     fireEvent.click(screen.getByLabelText(t('removeInstance')))
-    await waitFor(() => { expect(screen.getByText(t('noInstances'))).toBeTruthy() })
-    fireEvent.click(screen.getByLabelText(t('trashTitle')))
-    await waitFor(() => { expect(screen.getByRole('dialog')).toBeTruthy() })
+    await waitFor(() => { expect(screen.getByText(t('emptyInstancesTitle'))).toBeTruthy() })
+    fireEvent.click(screen.getByText(t('pageTrash')))
+    await waitFor(() => { expect(screen.getByText(t('trashRestore'))).toBeTruthy() })
     // Permanent delete opens the confirm dialog; cancelling keeps the item.
     fireEvent.click(screen.getByText(t('trashDelete')))
     await waitFor(() => { expect(screen.getByText(t('trashPermanentTitle'))).toBeTruthy() })
@@ -380,12 +381,12 @@ describe('humanized deletion and validation (v0.9.8)', () => {
     fireEvent.click(screen.getByText(t('trashDelete')))
     await waitFor(() => { expect(screen.getByText(t('trashPermanentTitle'))).toBeTruthy() })
     fireEvent.click(within(screen.getAllByRole('dialog').at(-1) as HTMLElement).getByText(t('confirmRemove')))
-    await waitFor(() => { expect(screen.getByText(t('trashEmpty'))).toBeTruthy() })
+    await waitFor(() => { expect(screen.getByText(t('trashEmptyTitle'))).toBeTruthy() })
   })
 
   it('removes a model row with an undo toast that restores it', async () => {
     const api = wireFace()
-    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    render(<NewApiSection api={api as never} t={t} autoSave={false} defaultEditIndex={0} />)
     await waitFor(() => { expect(screen.getByLabelText(`${t('modelId')} 1`)).toBeTruthy() })
     fireEvent.click(screen.getByLabelText(`${t('removeModel')} 1`))
     await waitFor(() => { expect(screen.getByText(t('undo'))).toBeTruthy() })

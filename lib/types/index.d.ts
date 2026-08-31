@@ -189,6 +189,13 @@ export interface NewApiUiSettings {
     undoMs?: number;
     undoEnabled?: boolean;
     soundEnabled?: boolean;
+    /**
+     * Show the post-removal toast the first time an instance is moved into the
+     * trash (default true). Once dismissed, the toast stays silent until the
+     * user re-enables this switch in settings — repeated nudges for a known
+     * behaviour are noise.
+     */
+    deleteRecoverHint?: boolean;
 }
 /** One extra API key of an instance (see {@link NewApiInstanceConfig.keys}). */
 export interface NewApiInstanceKeyConfig {

@@ -20,6 +20,7 @@ import type {
   ProbeRequest,
   ProbeResult,
 } from './params-types.ts'
+import { IconCard, IconChevron, IconPlus, IconTrash, SegmentedControl, SettingsPanel, InstanceEditPage } from './refresh-components.tsx'
 
 export interface NewApiSectionProps {
   api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
@@ -41,6 +42,12 @@ export interface NewApiSectionProps {
    * it so a deferred write never races their assertions.
    */
   autoSave?: boolean
+  /**
+   * Auto-open the instance at this index on mount. Tests pass `0` to skip
+   * the card-list click and start inside the editor; production never sets
+   * it (the user always clicks a card to enter editing).
+   */
+  defaultEditIndex?: number
 }
 
 const NS = 'llm-newapi'
@@ -203,7 +210,7 @@ function serializeInstance(draft: InstanceDraft): Record<string, unknown> {
  * @returns the section.
  */
 export function NewApiSection(props: NewApiSectionProps): ReactNode {
-  const { api, t, fetchModelParams, probe, parseChannelConn, autoSave = true } = props
+  const { api, t, fetchModelParams, probe, parseChannelConn, autoSave = true, defaultEditIndex = -1 } = props
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [errorText, setErrorText] = useState<string | undefined>(undefined)
   const [revision, setRevision] = useState<number>(0)
@@ -223,10 +230,24 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   const [pendingKeys, setPendingKeys] = useState<ReadonlyMap<string, string>>(new Map())
   const [busy, setBusy] = useState(false)
   // Configuration page vs global-settings page (gear): the two panels slide
-  // into each other; the gear hosts undo prefs and the channel-import action.
-  const [page, setPage] = useState<'config' | 'settings'>('config')
+  // into each; 'trash' is a third top-level page so the recycle bin lives
+  // in its own panel (the old inline trash toolbar was easy to miss next to
+  // manual save).
+  const [page, setPage] = useState<'config' | 'settings' | 'trash'>('config')
+  // -1 = no instance card opened; otherwise the instance index being edited.
+  // Editing happens in a full-width sub-page so the user can focus on one
+  // instance at a time without scrolling past the rest of the list.
+  // `defaultEditIndex` is only consulted on the first render (the initial
+  // state) — tests pass it to skip the card-list click and start inside
+  // the editor; production never sets it.
+  const [editIndex, setEditIndex] = useState(defaultEditIndex)
   // Global (non-instance) settings, persisted in the section's `ui` block.
-  const [ui, setUi] = useState({ undoMs: 7000, undoEnabled: true, soundEnabled: true })
+  const [ui, setUi] = useState({
+    undoMs: 7000,
+    undoEnabled: true,
+    soundEnabled: true,
+    deleteRecoverHint: true,
+  })
   // Big-window confirm for PERMANENT deletions inside the recycle bin.
   const [confirmRemoveIndex, setConfirmRemoveIndex] = useState(-1)
   const [confirmRemoveLeaving, setConfirmRemoveLeaving] = useState(false)
@@ -294,13 +315,22 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       setTrash(toDrafts({ instances: (section.value as { trash?: unknown } | null)?.trash ?? [] }))
       setPendingKeys(new Map())
       // Global (non-instance) UI prefs live in the section's `ui` block.
-      const raw = (section.value as { ui?: { undoMs?: unknown; undoEnabled?: unknown; soundEnabled?: unknown } } | null)?.ui
-      setUi({
+      const raw = (section.value as {
+        ui?: {
+          undoMs?: unknown
+          undoEnabled?: unknown
+          soundEnabled?: unknown
+          deleteRecoverHint?: unknown
+        }
+      } | null)?.ui
+      const nextUi = {
         undoMs: typeof raw?.undoMs === 'number' && Number.isFinite(raw.undoMs) ? raw.undoMs : 7000,
         undoEnabled: typeof raw?.undoEnabled === 'boolean' ? raw.undoEnabled : true,
         soundEnabled: typeof raw?.soundEnabled === 'boolean' ? raw.soundEnabled : true,
-      })
-      setSoundEnabled(typeof raw?.soundEnabled === 'boolean' ? raw.soundEnabled : true)
+        deleteRecoverHint: typeof raw?.deleteRecoverHint === 'boolean' ? raw.deleteRecoverHint : true,
+      }
+      setUi(nextUi)
+      setSoundEnabled(nextUi.soundEnabled)
       const refs = drafts.map(draft => clientRefOf(draft.id))
       if (refs.length > 0) {
         const credential = await api.credentials.describe({ refs })
@@ -370,6 +400,10 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       if (index < current) return current - 1 // a tab above closed: shift up
       return current
     })
+    // Closing the edit sub-page that owns this instance: the danger-area
+    // delete lives on the edit page, so after it fires we return to the
+    // config list.
+    if (editIndex === index) setEditIndex(-1)
     playSound('remove')
     const label = removed.displayName.trim().length > 0 ? ` ${removed.displayName.trim()}` : ''
     if (ui.undoEnabled) {
@@ -378,6 +412,14 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       })
     } else {
       pushToast(`${t('movedToTrash')}${label}`, 'info')
+    }
+    // First-time "it's in the recycle bin" nudge: fire once, then suppress
+    // until the user re-enables the switch in settings. Repeated nudges
+    // for a known behaviour are noise.
+    if (ui.deleteRecoverHint) {
+      pushToast(t('confirmDeleteRecoverHint'), 'info')
+      setUi(current => ({ ...current, deleteRecoverHint: false }))
+      markDirty()
     }
     markDirty()
   }
@@ -568,275 +610,190 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     : credentials.get(clientRefOf(activeDraft.id))
 
   return (
-    <section aria-label={t('nav')}>
-      <p>{t('intro')}</p>
+    <section aria-label={t('nav')} className="newapi-shell">
       {!writable ? <p>{t('readOnly')}</p> : null}
       {errorText === undefined ? null : <p className="newapi-error">{errorText}</p>}
 
-      {/* Toolbar: config ⇄ settings pages, live save state, manual save. */}
-      <div className="newapi-toolbar">
-        <div className="newapi-toolbar-tabs" role="tablist" aria-label={t('nav')}>
-          <button
-            type="button" role="tab" aria-selected={page === 'config'}
-            className={`newapi-toolbar-tab${page === 'config' ? ' newapi-toolbar-tabActive' : ''}`}
-            onClick={() => { setPage('config') }}
-          >
-            <span className="newapi-toolbar-ico newapi-toolbar-ico--cards" aria-hidden />
-            {t('configPage')}
-          </button>
-          <button
-            type="button" role="tab" aria-selected={page === 'settings'}
-            className={`newapi-toolbar-tab${page === 'settings' ? ' newapi-toolbar-tabActive' : ''}`}
-            onClick={() => { setPage('settings') }}
-          >
-            <span className="newapi-toolbar-ico newapi-toolbar-ico--gear" aria-hidden />
-            {t('settingsPage')}
-          </button>
-        </div>
-        <div className="newapi-toolbar-right">
-          <button
-            type="button"
-            className={`newapi-trashbtn${trash.length > 0 ? ' newapi-trashbtn--has' : ''}`}
-            aria-label={t('trashTitle')}
-            title={t('trashTitle')}
-            onClick={() => { setTrashOpen(current => !current) }}
-          >
-            <svg className="newapi-trashbtn-ico" viewBox="0 0 16 16" fill="none" aria-hidden>
-              <path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9a1 1 0 001 .9h4.6a1 1 0 001-.9L12 4M6.5 6.8v4.4M9.5 6.8v4.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            {trash.length > 0 ? <span className="newapi-trashbtn-badge">{String(trash.length)}</span> : null}
-          </button>
-          <span className={`newapi-savestate${saveState === 'clean' ? ' newapi-savestate--hidden' : ''} newapi-savestate--${saveState}`}>
-            {saveState === 'dirty' ? t('unsaved') : saveState === 'saving' ? t('saving') : t('savedLive')}
-          </span>
-          <button
-            type="button" className="newapi-button newapi-button--primary"
-            disabled={busy || !writable}
-            onClick={() => { void save(false) }}
-          >
-            {busy ? t('applying') : t('apply')}
-          </button>
-        </div>
-      </div>
-
-      <div className={`newapi-page newapi-page--${page}`}>
-        <div className="newapi-panel">
-          <div className="newapi-tabs" role="tablist" aria-label={t('instanceTabs')}>
-            {instances.map((draft, index) => {
-              const isActive = index === safeActiveIndex
-              const label = draft.displayName.trim().length > 0
-                ? draft.displayName
-                : (draft.id.trim().length > 0 ? draft.id : `${t('instanceTitle')} ${String(index + 1)}`)
-              return (
-                <button
-                  key={`tab-${String(index)}`}
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  className={`newapi-tab ${isActive ? 'newapi-tabActive' : ''}`}
-                  onClick={() => { setActiveIndex(index) }}
-                >
-                  <span className="newapi-tabLabel">{label}</span>
-                </button>
-              )
-            })}
-            <button
-              type="button"
-              className="newapi-tab newapi-tabAdd"
-              title={t('addInstance')}
-              onClick={addInstance}
-            >
-              +
-            </button>
-          </div>
-
-          {instances.length === 0 ? (
-            <p className="newapi-empty">{t('noInstances')}</p>
-          ) : activeDraft === undefined ? null : (
-            <InstanceEditor
-              // Keyed by POSITION, not by draft id: the id field is editable,
-              // and a key that changes mid-typing would remount the whole card.
-              key={`instance-${String(safeActiveIndex)}`}
-              index={safeActiveIndex}
-              draft={activeDraft}
-              {...activeCredential === undefined
-                ? { keyLocked: false }
-                : {
-                  ...activeCredential.configured === undefined ? {} : { keyConfigured: activeCredential.configured },
-                  keyLocked: activeCredential.locked,
-                }}
-              api={api}
-              t={t}
-              fetchModelParams={fetchModelParams}
-              probe={probe}
-              onPatch={(patch) => { patchInstance(safeActiveIndex, patch) }}
-              onPendingKey={(ref, value) => { handlePendingKey(safeActiveIndex, ref, value) }}
-              onRequestRemove={() => { removeInstance(safeActiveIndex) }}
-              notify={pushToast}
-              undoEnabled={ui.undoEnabled}
-            />
-          )}
-
-          <p className="newapi-hint">{t('modelHint')}</p>
-        </div>
-
-        <div className="newapi-panel">
-          <section className="newapi-settings-block" aria-label={t('settingsPage')}>
-            <div className="newapi-catalog-head">
-              <span className="newapi-catalog-title">{t('settingsUndo')}</span>
-              <button
-                type="button" role="switch" aria-checked={ui.undoEnabled}
-                aria-label={t('settingsUndo')}
-                className={`newapi-switch${ui.undoEnabled ? ' newapi-switch--on' : ''}`}
-                onClick={() => {
-                  setUi(current => {
-                    const next = { ...current, undoEnabled: !current.undoEnabled }
-                    pushToast(next.undoEnabled ? t('undoOn') : t('undoOff'), 'info')
-                    markDirty()
-                    return next
-                  })
-                }}
-              >
-                <span className="newapi-switch-knob" />
-              </button>
-            </div>
-            <label className="newapi-proxylabel">
-              {t('settingsUndoMs')}
-              <input
-                className="newapi-input newapi-select" type="number" min={1000} max={60000} step={500}
-                aria-label={t('settingsUndoMs')}
-                value={ui.undoMs}
-                disabled={!ui.undoEnabled}
-                onChange={(event) => {
-                  const ms = Number(event.target.value)
-                  if (!Number.isFinite(ms) || ms <= 0) return
-                  setUi(current => ({ ...current, undoMs: Math.min(60000, Math.max(1000, ms)) }))
-                  markDirty()
-                }}
-              />
-            </label>
-
-            <div className="newapi-catalog-head" style={{ marginTop: 18 }}>
-              <span className="newapi-catalog-title">{t('settingsSound')}</span>
-              <button
-                type="button" role="switch" aria-checked={ui.soundEnabled}
-                aria-label={t('settingsSound')}
-                className={`newapi-switch${ui.soundEnabled ? ' newapi-switch--on' : ''}`}
-                onClick={() => {
-                  setUi(current => {
-                    const next = { ...current, soundEnabled: !current.soundEnabled }
-                    setSoundEnabled(next.soundEnabled)
-                    pushToast(next.soundEnabled ? t('soundOn') : t('soundOff'), 'info')
-                    markDirty()
-                    return next
-                  })
-                }}
-              >
-                <span className="newapi-switch-knob" />
-              </button>
-            </div>
-
-            <div className="newapi-catalog-head" style={{ marginTop: 18 }}>
-              <span className="newapi-catalog-title">{t('importChannelConn')}</span>
-            </div>
-            <p className="newapi-hint">{t('importHint')}</p>
-            <textarea
-              className="newapi-input" rows={3} spellCheck={false}
-              style={{ width: '100%', resize: 'vertical', fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12 }}
-              value={importText}
-              onChange={(event) => { setImportText(event.target.value); setImportError(undefined) }}
-            />
-            {importError === undefined ? null : <p className="newapi-error">{importError}</p>}
-            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <button
-                type="button" className="newapi-button newapi-button--primary"
-                disabled={importBusy || importText.trim().length === 0}
-                onClick={() => { void runImport() }}
-              >
-                {importBusy ? t('importBusy') : t('importApply')}
-              </button>
-              <button
-                type="button" className="newapi-button"
-                onClick={() => { setImportText(''); setImportError(undefined) }}
-              >
-                {t('fetchCancel')}
-              </button>
-            </div>
-          </section>
-        </div>
-      </div>
-
-      {/* Recycle bin panel: recover or permanently delete deleted instances. */}
-      {!trashOpen ? null : (
-        <div
-          className="newapi-modal-backdrop"
-          onClick={() => { setTrashOpen(false) }}
+      {/* Top-level segmented control: three top-level pages. The trash
+          segment carries the recycle-bin count when there is anything to
+        show — surfacing the bin makes it harder to forget an instance was
+        moved out of the active list. The manual Save button sits on the
+        same bar so the user never has to hunt for it. */}
+      <div className="newapi-segbar">
+        <SegmentedControl
+          value={page}
+          onChange={(value) => {
+            setPage(value)
+            if (value !== 'config') setEditIndex(-1)
+          }}
+          options={[
+            { value: 'config', label: t('pageConfig') },
+            { value: 'settings', label: t('pageSettings') },
+            trash.length > 0
+              ? { value: 'trash', label: t('pageTrash'), badge: String(trash.length) }
+              : { value: 'trash', label: t('pageTrash') },
+          ]}
+        />
+        <span className={`newapi-savestate${saveState === 'clean' ? ' newapi-savestate--hidden' : ''} newapi-savestate--${saveState}`}>
+          {saveState === 'dirty' ? t('unsaved') : saveState === 'saving' ? t('saving') : t('savedLive')}
+        </span>
+        <button
+          type="button" className="newapi-btn newapi-btn--primary"
+          disabled={busy || !writable}
+          onClick={() => { void save(false) }}
         >
-          <div
-            className="newapi-modal newapi-modal--trash" role="dialog" aria-modal="true"
-            aria-label={t('trashTitle')}
-            onClick={(event) => { event.stopPropagation() }}
-          >
-            <h3 className="newapi-modal-title">{t('trashTitle')}</h3>
-            {trash.length === 0 ? (
-              <p className="newapi-modal-body newapi-empty">{t('trashEmpty')}</p>
-            ) : (
-              <ul className="newapi-trash-list">
-                {trash.map((draft, index) => (
-                  <li key={`${draft.id}-${String(index)}`} className="newapi-trash-item">
-                    <span className="newapi-trash-item-name">
-                      {draft.displayName.trim().length > 0 ? draft.displayName : draft.id}
-                    </span>
-                    <span className="newapi-trash-item-sub">
-                      {draft.baseURL.trim().length > 0 ? draft.baseURL : t('noBaseUrl')}
-                    </span>
-                    <div className="newapi-trash-item-actions">
-                      <button
-                        type="button" className="newapi-button"
-                        onClick={() => { restoreInstance(draft, instances.length) }}
-                      >
-                        {t('trashRestore')}
-                      </button>
-                      <button
-                        type="button" className="newapi-button newapi-button--danger"
-                        onClick={() => { setConfirmRemoveIndex(index) }}
-                      >
-                        {t('trashDelete')}
+          {busy ? t('applying') : t('apply')}
+        </button>
+      </div>
+
+      {page === 'config'
+        ? (
+            (() => {
+              const draft = editIndex >= 0 && editIndex < instances.length ? instances[editIndex] : undefined
+              if (draft === undefined) {
+                return (
+                  <>
+                    {instances.length === 0 ? (
+                      <div className="newapi-cardlist" style={{ borderRadius: 12 }}>
+                        <div className="newapi-empty">
+                          <div className="newapi-empty-title">{t('emptyInstancesTitle')}</div>
+                          <div className="newapi-empty-sub">{t('emptyInstancesSubtitle')}</div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="newapi-cardlist newapi-cardlist--divider">
+                        {instances.map((d, index) => {
+                          const title = d.displayName.trim().length > 0
+                            ? d.displayName
+                            : (d.id.trim().length > 0 ? d.id : `${t('instanceTitle')} ${String(index + 1)}`)
+                          const protoName = d.protocol === 'anthropic'
+                            ? t('protocolAnthropic')
+                            : d.protocol === 'responses' ? t('protocolResponses') : t('protocolOpenai')
+                          const sub = `${t('protocolLabel').replace('{name}', protoName)} · ${t('modelsCount').replace('{count}', String(d.models.length))}`
+                          return (
+                            <button
+                              key={`instance-${String(index)}`}
+                              type="button" className="newapi-card"
+                              onClick={() => { setEditIndex(index) }}
+                            >
+                              <span className="newapi-card-ico" aria-hidden>
+                                <IconCard type={d.protocol} />
+                              </span>
+                              <span className="newapi-card-body">
+                                <span className="newapi-card-title">{title}</span>
+                                <span className="newapi-card-sub">{sub}</span>
+                              </span>
+                              <span className="newapi-card-trailing"><IconChevron /></span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                    <div className="newapi-addbar">
+                      <button type="button" className="newapi-btn newapi-btn--primary newapi-btn--lg" onClick={addInstance}>
+                        <IconPlus />
+                        {t('addInstancePrimary')}
                       </button>
                     </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="newapi-modal-actions">
-              {trash.length > 0 ? (
-                <button
-                  type="button" className="newapi-button newapi-button--danger"
-                  onClick={() => { setConfirmRemoveIndex(-2) }}
-                >
-                  {t('trashClear')}
-                </button>
-              ) : null}
-              <button
-                type="button" className="newapi-button"
-                onClick={() => { setTrashOpen(false) }}
-              >
-                {t('fetchCancel')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+                  </>
+                )
+              }
+              return (
+                <InstanceEditPage
+                  draft={draft}
+                  credential={credentials.get(clientRefOf(draft.id))}
+                  onBack={() => { setEditIndex(-1) }}
+                  onPatch={(patch) => { patchInstance(editIndex, patch) }}
+                  onPendingKey={(ref, value) => { handlePendingKey(editIndex, ref, value) }}
+                  onRemove={() => { removeInstance(editIndex) }}
+                  notify={pushToast}
+                  undoEnabled={ui.undoEnabled}
+                  api={api}
+                  t={t}
+                  fetchModelParams={fetchModelParams}
+                  probe={probe}
+                />
+              )
+            })()
+          )
+        : null}
 
-      {/* Permanent deletion (from the recycle bin) is irreversible: the
-          big-window confirm applies HERE, never to the recoverable move. */}
+      {page === 'settings'
+        ? (
+            <SettingsPanel
+              ui={ui}
+              setUi={setUi}
+              markDirty={markDirty}
+              pushToast={pushToast}
+              t={t}
+              importText={importText}
+              setImportText={setImportText}
+              importError={importError}
+              setImportError={setImportError}
+              importBusy={importBusy}
+              runImport={runImport}
+            />
+          )
+        : null}
+
+      {page === 'trash'
+        ? (
+            trash.length === 0 ? (
+              <div className="newapi-cardlist" style={{ borderRadius: 12 }}>
+                <div className="newapi-empty">
+                  <div className="newapi-empty-title">{t('trashEmptyTitle')}</div>
+                  <div className="newapi-empty-sub">{t('trashEmptySubtitle')}</div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="newapi-cardlist newapi-cardlist--divider">
+                  {trash.map((draft, trashIndex) => {
+                    const title = draft.displayName.trim().length > 0 ? draft.displayName : draft.id
+                    const sub = draft.baseURL.trim().length > 0 ? draft.baseURL : t('noBaseUrl')
+                    return (
+                      <div key={`trash-${String(trashIndex)}`} className="newapi-card" style={{ cursor: 'default' }}>
+                        <span className="newapi-card-ico" aria-hidden style={{ background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-secondary)' }}>
+                          <IconTrash />
+                        </span>
+                        <span className="newapi-card-body">
+                          <span className="newapi-card-title">{title}</span>
+                          <span className="newapi-card-sub">{sub}</span>
+                        </span>
+                        <span className="newapi-card-trailing" style={{ display: 'flex', gap: 8 }}>
+                          <button
+                            type="button" className="newapi-btn newapi-btn--ghost"
+                            onClick={() => { restoreInstance(draft) }}
+                          >{t('trashRestore')}</button>
+                          <button
+                            type="button" className="newapi-btn newapi-btn--danger"
+                            onClick={() => { setConfirmRemoveIndex(trashIndex) }}
+                          >{t('trashDelete')}</button>
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+                <div className="newapi-addbar">
+                  <button
+                    type="button" className="newapi-btn newapi-btn--danger"
+                    onClick={() => { setConfirmRemoveIndex(-2) }}
+                  >{t('trashClear')}</button>
+                </div>
+              </>
+            )
+          )
+        : null}
+
+      {/* Permanent deletion from the recycle bin: big-window confirm.
+          The recoverable move-to-bin never gates behind this — it lives
+          in the danger area of the edit page where the user explicitly
+          opened the instance. */}
       {confirmRemoveIndex < 0 ? null : (
-        <div
-          className={`newapi-modal-backdrop newapi-modal-backdrop--top${confirmRemoveLeaving ? ' newapi-modal--leaving' : ''}`}
+        <div className={`newapi-modal-backdrop${confirmRemoveLeaving ? ' newapi-modal--leaving' : ''}`}
           onClick={() => { setConfirmRemoveIndex(-1) }}
         >
-          <div
-            className="newapi-modal" role="dialog" aria-modal="true"
+          <div className="newapi-modal" role="dialog" aria-modal="true"
             aria-label={t('confirmRemoveInstance')}
             onClick={(event) => { event.stopPropagation() }}
           >
@@ -844,19 +801,12 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
             <p className="newapi-modal-body">
               {confirmRemoveIndex === -2
                 ? t('trashClearBody')
-                : `${t('trashPermanentBody')} ${
-                  trash[confirmRemoveIndex]?.displayName.trim() || trash[confirmRemoveIndex]?.id || ''
-                }`}
+                : `${t('trashPermanentBody')} ${trash[confirmRemoveIndex]?.displayName.trim() || trash[confirmRemoveIndex]?.id || ''}`}
             </p>
             <div className="newapi-modal-actions">
+              <button type="button" className="newapi-btn newapi-btn--ghost" onClick={() => { setConfirmRemoveIndex(-1) }}>{t('fetchCancel')}</button>
               <button
-                type="button" className="newapi-button"
-                onClick={() => { setConfirmRemoveIndex(-1) }}
-              >
-                {t('fetchCancel')}
-              </button>
-              <button
-                type="button" className="newapi-button newapi-button--danger"
+                type="button" className="newapi-btn newapi-btn--primary"
                 onClick={() => {
                   const index = confirmRemoveIndex
                   setConfirmRemoveIndex(-1)
@@ -864,11 +814,8 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
                   setTimeout(() => setConfirmRemoveLeaving(false), 200)
                   if (index === -2) clearTrash()
                   else permanentlyDelete(index)
-                  // Keep the bin open so a batch of cleanups flows naturally.
                 }}
-              >
-                {t('confirmRemove')}
-              </button>
+              >{t('confirmRemove')}</button>
             </div>
           </div>
         </div>
@@ -883,9 +830,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
                 <button
                   type="button" className="newapi-toast-undo"
                   onClick={() => { toast.onUndo?.(); dismissToast(toast.id) }}
-                >
-                  {t('undo')}
-                </button>
+                >{t('undo')}</button>
               )}
             </div>
           ))}

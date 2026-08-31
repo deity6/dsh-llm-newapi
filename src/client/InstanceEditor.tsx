@@ -215,6 +215,12 @@ export interface InstanceEditorProps {
   /** Ask the parent to open the big-window deletion confirm. */
   onRequestRemove: () => void
   /**
+   * Hide the in-header trash icon (the edit page owns removal in its danger
+   * area, so the header's prominent delete icon is suppressed to keep a
+   * single, less obvious delete affordance).
+   */
+  hideRemoveButton?: boolean
+  /**
    * Transient feedback from inside the card: a toast with an optional undo
    * action. Instance removal goes through the big confirm dialog instead of
    * an undo; row removals (models/headers) use the undo pill when enabled.
@@ -231,7 +237,7 @@ export interface InstanceEditorProps {
  * @returns the card.
  */
 export function InstanceEditor(props: InstanceEditorProps): ReactNode {
-  const { index, draft, keyConfigured, keyLocked, api, t, fetchModelParams, probe, onPatch, onPendingKey, onRequestRemove, notify, undoEnabled } = props
+  const { index, draft, keyConfigured, keyLocked, api, t, fetchModelParams, probe, onPatch, onPendingKey, onRequestRemove, notify, undoEnabled, hideRemoveButton } = props
   const [keyDraft, setKeyDraft] = useState('')
   // Per extra-key password drafts: keyId → typed (unsaved) secret.
   const [keyDrafts, setKeyDrafts] = useState<Readonly<Record<string, string>>>({})
@@ -551,17 +557,22 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
     <fieldset className="newapi-instance">
       <legend className="newapi-instance-head">
         <span className="newapi-instance-title">{`${t('instanceTitle')} ${String(index + 1)}`}</span>
-        <span className="newapi-instance-actions">
-          <button
-            type="button"
-            className="newapi-iconbutton newapi-iconbutton--danger"
-            aria-label={t('removeInstance')}
-            title={t('removeInstance')}
-            onClick={onRequestRemove}
-          >
-            <IconTrash />
-          </button>
-        </span>
+        {/* The danger-area delete (edit page) owns removal; the in-header
+            trash icon was the old prominent delete. When the parent hides
+            it (hideRemoveButton), removal only exists in the danger zone. */}
+        {hideRemoveButton === true ? null : (
+          <span className="newapi-instance-actions">
+            <button
+              type="button"
+              className="newapi-iconbutton newapi-iconbutton--danger"
+              aria-label={t('removeInstance')}
+              title={t('removeInstance')}
+              onClick={onRequestRemove}
+            >
+              <IconTrash />
+            </button>
+          </span>
+        )}
       </legend>
 
       {notice === undefined ? null : <p role="status">{notice}</p>}
