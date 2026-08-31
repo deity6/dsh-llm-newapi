@@ -15,10 +15,10 @@ import type { NewApiKey } from './locale.ts'
 import type {
   ModelsDevParamsRequest,
   ModelsDevParamsResponse,
-  ParsedChannelConn,
   ProbeRequest,
   ProbeResult,
 } from './params-types.ts'
+import { playSound } from './sound.ts'
 
 /** One catalog entry, structurally open like the official editors. */
 export type ModelDraft = Record<string, unknown>
@@ -291,9 +291,13 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
       applyRemoval()
     }
     if (removed !== undefined) {
+      playSound('remove')
       const label = textOf(removed, 'id').trim() || `${t('models')} ${String(modelIndex + 1)}`
       if (undoEnabled) {
-        notify(t('removedModel').replace('{name}', label), 'undo', () => { patch({ models: before }) })
+        notify(t('removedModel').replace('{name}', label), 'undo', () => {
+          playSound('restore')
+          patch({ models: before })
+        })
       } else {
         notify(t('removedModel').replace('{name}', label), 'info')
       }
@@ -305,9 +309,13 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
     const removed = draft.headers[headerIndex]
     patch({ headers: draft.headers.filter((_, at) => at !== headerIndex) })
     if (removed !== undefined) {
+      playSound('remove')
       const label = removed.name.trim() || `${t('headerName')} ${String(headerIndex + 1)}`
       if (undoEnabled) {
-        notify(t('removedHeader').replace('{name}', label), 'undo', () => { patch({ headers: before }) })
+        notify(t('removedHeader').replace('{name}', label), 'undo', () => {
+          playSound('restore')
+          patch({ headers: before })
+        })
       } else {
         notify(t('removedHeader').replace('{name}', label), 'info')
       }
@@ -328,6 +336,13 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
   }
 
   const fetchModels = async (): Promise<void> => {
+    // Guard: an empty address would silently fall back to the stored one —
+    // confusing when the user just wants to (re)discover for the draft.
+    if (draft.baseURL.trim().length === 0) {
+      notify(t('fetchNeedsBaseUrl'), 'info')
+      return
+    }
+    notify(`${t('fetchingFrom')} ${draft.baseURL.trim()}`, 'info')
     setBusy(true)
     setError(undefined)
     setCandidates(undefined)
@@ -690,7 +705,7 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
           <span className="newapi-catalog-title">{t('models')}</span>
           <div className="newapi-catalog-actions" style={{ display: 'flex', gap: 4 }}>
             <button type="button" className="newapi-linkbutton" disabled={busy} onClick={() => { void fetchModels() }}>
-              {busy ? t('fetching') : t('fetchModels')}
+              {busy ? <><span className="newapi-spinner" aria-hidden />{t('fetching')}</> : t('fetchModels')}
             </button>
             <button type="button" className="newapi-linkbutton" disabled={paramsBusy} onClick={() => { void updateParams() }}>
               {paramsBusy ? t('paramsFetching') : t('updateParams')}

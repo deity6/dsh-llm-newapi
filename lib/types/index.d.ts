@@ -157,6 +157,12 @@ export interface Config {
      * the settings page can persist them.
      */
     ui?: NewApiUiSettings;
+    /**
+     * Deleted instances awaiting restore or permanent removal. The host never
+     * registers these (no route, no provider group); only the settings page
+     * reads the list to offer 恢复 / 彻底删除.
+     */
+    trash?: NewApiInstanceConfig[];
 }
 /**
  * Global (non-instance) UI preferences — the undo-pill window and toggle.
@@ -166,6 +172,7 @@ export interface Config {
 export interface NewApiUiSettings {
     undoMs?: number;
     undoEnabled?: boolean;
+    soundEnabled?: boolean;
 }
 /** How an instance's gateway traffic reaches the network. */
 export type ProxyMode = 'system' | 'direct' | 'custom';

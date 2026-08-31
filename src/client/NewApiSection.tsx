@@ -12,6 +12,7 @@ import type { IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@dee
 import { DEFAULT_PROXY_URL, InstanceEditor, sanitizeClientId, clientRefOf, headersToList, headersToRecord } from './InstanceEditor.tsx'
 import type { InstanceDraft, InstanceProxyMode, ModelDraft } from './InstanceEditor.tsx'
 import type { NewApiKey } from './locale.ts'
+import { playSound, setSoundEnabled } from './sound.ts'
 import type {
   ModelsDevParamsRequest,
   ModelsDevParamsResponse,
@@ -183,6 +184,10 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   const [revision, setRevision] = useState<number>(0)
   const [writable, setWritable] = useState(true)
   const [instances, setInstances] = useState<InstanceDraft[]>([])
+  // Recycle bin: deleted instances are recoverable here until permanently
+  // removed. The host never registers these (no route, no provider group).
+  const [trash, setTrash] = useState<InstanceDraft[]>([])
+  const [trashOpen, setTrashOpen] = useState(false)
   // Active tab tracked by POSITION, not by instance id: the id field is
   // editable, so matching by id makes the active tab "orphan" the moment the
   // user types (findIndex misses -> falls back to index 0 -> the card jumps
@@ -196,8 +201,8 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   // into each other; the gear hosts undo prefs and the channel-import action.
   const [page, setPage] = useState<'config' | 'settings'>('config')
   // Global (non-instance) settings, persisted in the section's `ui` block.
-  const [ui, setUi] = useState({ undoMs: 7000, undoEnabled: true })
-  // Big-window confirm for instance deletion (destructive: tears the route).
+  const [ui, setUi] = useState({ undoMs: 7000, undoEnabled: true, soundEnabled: true })
+  // Big-window confirm for PERMANENT deletions inside the recycle bin.
   const [confirmRemoveIndex, setConfirmRemoveIndex] = useState(-1)
   const [confirmRemoveLeaving, setConfirmRemoveLeaving] = useState(false)
   // Import (moved into the settings page): raw descriptor + busy + error.
@@ -261,13 +266,16 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       setRevision(section.revision)
       const drafts = toDrafts(section.value)
       setInstances(drafts)
+      setTrash(toDrafts({ instances: (section.value as { trash?: unknown } | null)?.trash ?? [] }))
       setPendingKeys(new Map())
       // Global (non-instance) UI prefs live in the section's `ui` block.
-      const raw = (section.value as { ui?: { undoMs?: unknown; undoEnabled?: unknown } } | null)?.ui
+      const raw = (section.value as { ui?: { undoMs?: unknown; undoEnabled?: unknown; soundEnabled?: unknown } } | null)?.ui
       setUi({
         undoMs: typeof raw?.undoMs === 'number' && Number.isFinite(raw.undoMs) ? raw.undoMs : 7000,
         undoEnabled: typeof raw?.undoEnabled === 'boolean' ? raw.undoEnabled : true,
+        soundEnabled: typeof raw?.soundEnabled === 'boolean' ? raw.soundEnabled : true,
       })
+      setSoundEnabled(typeof raw?.soundEnabled === 'boolean' ? raw.soundEnabled : true)
       const refs = drafts.map(draft => clientRefOf(draft.id))
       if (refs.length > 0) {
         const credential = await api.credentials.describe({ refs })
@@ -325,13 +333,56 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     autoSaveTimer.current = setTimeout(() => { void save(true) }, 1500)
   }
 
+  // Deleting an instance moves it into the recycle bin (recoverable, so no
+  // confirm dialog): the route/provider group vanish from the host, the
+  // config stays one tap away from coming back.
   const removeInstance = (index: number): void => {
+    const removed = instances[index]
+    if (removed === undefined) return
     setInstances(current => current.filter((_, at) => at !== index))
+    setTrash(current => [...current, removed])
     setActiveIndex(current => {
       if (index < current) return current - 1 // a tab above closed: shift up
-      if (index === current) return current   // the active tab closed: the next
-      return current                          // slides into this position
+      return current
     })
+    playSound('remove')
+    const label = removed.displayName.trim().length > 0 ? ` ${removed.displayName.trim()}` : ''
+    if (ui.undoEnabled) {
+      pushToast(`${t('movedToTrash')}${label}`, 'undo', () => {
+        restoreInstance(removed, Math.min(index, instances.length))
+      })
+    } else {
+      pushToast(`${t('movedToTrash')}${label}`, 'info')
+    }
+    markDirty()
+  }
+
+  const restoreInstance = (draft: InstanceDraft, atIndex?: number): void => {
+    setTrash(current => current.filter(entry => entry.id !== draft.id))
+    setInstances(current => {
+      const next = [...current]
+      const at = atIndex === undefined ? current.length : Math.min(atIndex, current.length)
+      next.splice(at, 0, draft)
+      return next
+    })
+    if (atIndex !== undefined) setActiveIndex(atIndex)
+    playSound('restore')
+    pushToast(t('restoredInstance'), 'ok')
+    markDirty()
+  }
+
+  const permanentlyDelete = (index: number): void => {
+    setTrash(current => current.filter((_, at) => at !== index))
+    playSound('trash')
+    pushToast(t('trashPermanentlyDeleted'), 'info')
+    markDirty()
+  }
+
+  const clearTrash = (): void => {
+    if (trash.length === 0) return
+    setTrash([])
+    playSound('trash')
+    pushToast(t('trashCleared'), 'info')
     markDirty()
   }
 
@@ -407,6 +458,10 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
         op: 'set',
         path: ['instances'],
         value: instances.map(serializeInstance),
+      }, {
+        op: 'set',
+        path: ['trash'],
+        value: trash.map(serializeInstance),
       }, {
         op: 'set',
         path: ['ui'],
@@ -515,6 +570,18 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
           </button>
         </div>
         <div className="newapi-toolbar-right">
+          <button
+            type="button"
+            className={`newapi-trashbtn${trash.length > 0 ? ' newapi-trashbtn--has' : ''}`}
+            aria-label={t('trashTitle')}
+            title={t('trashTitle')}
+            onClick={() => { setTrashOpen(current => !current) }}
+          >
+            <svg className="newapi-trashbtn-ico" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9a1 1 0 001 .9h4.6a1 1 0 001-.9L12 4M6.5 6.8v4.4M9.5 6.8v4.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            {trash.length > 0 ? <span className="newapi-trashbtn-badge">{String(trash.length)}</span> : null}
+          </button>
           <span className={`newapi-savestate${saveState === 'clean' ? ' newapi-savestate--hidden' : ''} newapi-savestate--${saveState}`}>
             {saveState === 'dirty' ? t('unsaved') : saveState === 'saving' ? t('saving') : t('savedLive')}
           </span>
@@ -580,7 +647,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
               probe={probe}
               onPatch={(patch) => { patchInstance(safeActiveIndex, patch) }}
               onPendingKey={(value) => { handlePendingKey(safeActiveIndex, value) }}
-              onRequestRemove={() => { setConfirmRemoveIndex(safeActiveIndex) }}
+              onRequestRemove={() => { removeInstance(safeActiveIndex) }}
               notify={pushToast}
               undoEnabled={ui.undoEnabled}
             />
@@ -626,6 +693,26 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
             </label>
 
             <div className="newapi-catalog-head" style={{ marginTop: 18 }}>
+              <span className="newapi-catalog-title">{t('settingsSound')}</span>
+              <button
+                type="button" role="switch" aria-checked={ui.soundEnabled}
+                aria-label={t('settingsSound')}
+                className={`newapi-switch${ui.soundEnabled ? ' newapi-switch--on' : ''}`}
+                onClick={() => {
+                  setUi(current => {
+                    const next = { ...current, soundEnabled: !current.soundEnabled }
+                    setSoundEnabled(next.soundEnabled)
+                    pushToast(next.soundEnabled ? t('soundOn') : t('soundOff'), 'info')
+                    markDirty()
+                    return next
+                  })
+                }}
+              >
+                <span className="newapi-switch-knob" />
+              </button>
+            </div>
+
+            <div className="newapi-catalog-head" style={{ marginTop: 18 }}>
               <span className="newapi-catalog-title">{t('importChannelConn')}</span>
             </div>
             <p className="newapi-hint">{t('importHint')}</p>
@@ -655,11 +742,73 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
         </div>
       </div>
 
-      {/* Instance deletion is destructive (route torn down, credential
-          orphaned): a big-window confirm, never an undo. */}
+      {/* Recycle bin panel: recover or permanently delete deleted instances. */}
+      {!trashOpen ? null : (
+        <div
+          className="newapi-modal-backdrop"
+          onClick={() => { setTrashOpen(false) }}
+        >
+          <div
+            className="newapi-modal newapi-modal--trash" role="dialog" aria-modal="true"
+            aria-label={t('trashTitle')}
+            onClick={(event) => { event.stopPropagation() }}
+          >
+            <h3 className="newapi-modal-title">{t('trashTitle')}</h3>
+            {trash.length === 0 ? (
+              <p className="newapi-modal-body newapi-empty">{t('trashEmpty')}</p>
+            ) : (
+              <ul className="newapi-trash-list">
+                {trash.map((draft, index) => (
+                  <li key={`${draft.id}-${String(index)}`} className="newapi-trash-item">
+                    <span className="newapi-trash-item-name">
+                      {draft.displayName.trim().length > 0 ? draft.displayName : draft.id}
+                    </span>
+                    <span className="newapi-trash-item-sub">
+                      {draft.baseURL.trim().length > 0 ? draft.baseURL : t('noBaseUrl')}
+                    </span>
+                    <div className="newapi-trash-item-actions">
+                      <button
+                        type="button" className="newapi-button"
+                        onClick={() => { restoreInstance(draft, instances.length) }}
+                      >
+                        {t('trashRestore')}
+                      </button>
+                      <button
+                        type="button" className="newapi-button newapi-button--danger"
+                        onClick={() => { setConfirmRemoveIndex(index) }}
+                      >
+                        {t('trashDelete')}
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="newapi-modal-actions">
+              {trash.length > 0 ? (
+                <button
+                  type="button" className="newapi-button newapi-button--danger"
+                  onClick={() => { setConfirmRemoveIndex(-2) }}
+                >
+                  {t('trashClear')}
+                </button>
+              ) : null}
+              <button
+                type="button" className="newapi-button"
+                onClick={() => { setTrashOpen(false) }}
+              >
+                {t('fetchCancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Permanent deletion (from the recycle bin) is irreversible: the
+          big-window confirm applies HERE, never to the recoverable move. */}
       {confirmRemoveIndex < 0 ? null : (
         <div
-          className={`newapi-modal-backdrop${confirmRemoveLeaving ? ' newapi-modal--leaving' : ''}`}
+          className={`newapi-modal-backdrop newapi-modal-backdrop--top${confirmRemoveLeaving ? ' newapi-modal--leaving' : ''}`}
           onClick={() => { setConfirmRemoveIndex(-1) }}
         >
           <div
@@ -667,9 +816,13 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
             aria-label={t('confirmRemoveInstance')}
             onClick={(event) => { event.stopPropagation() }}
           >
-            <h3 className="newapi-modal-title">{t('confirmRemoveInstance')}</h3>
+            <h3 className="newapi-modal-title">{t('trashPermanentTitle')}</h3>
             <p className="newapi-modal-body">
-              {`${t('confirmRemoveInstanceBody')} ${instances[confirmRemoveIndex]?.displayName.trim() || instances[confirmRemoveIndex]?.id || ''}`}
+              {confirmRemoveIndex === -2
+                ? t('trashClearBody')
+                : `${t('trashPermanentBody')} ${
+                  trash[confirmRemoveIndex]?.displayName.trim() || trash[confirmRemoveIndex]?.id || ''
+                }`}
             </p>
             <div className="newapi-modal-actions">
               <button
@@ -685,8 +838,9 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
                   setConfirmRemoveIndex(-1)
                   setConfirmRemoveLeaving(true)
                   setTimeout(() => setConfirmRemoveLeaving(false), 200)
-                  removeInstance(index)
-                  pushToast(t('removedInstance'), 'info')
+                  if (index === -2) clearTrash()
+                  else permanentlyDelete(index)
+                  // Keep the bin open so a batch of cleanups flows naturally.
                 }}
               >
                 {t('confirmRemove')}

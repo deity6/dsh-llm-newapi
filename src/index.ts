@@ -219,6 +219,12 @@ export interface Config {
    * the settings page can persist them.
    */
   ui?: NewApiUiSettings
+  /**
+   * Deleted instances awaiting restore or permanent removal. The host never
+   * registers these (no route, no provider group); only the settings page
+   * reads the list to offer 恢复 / 彻底删除.
+   */
+  trash?: NewApiInstanceConfig[]
 }
 
 /**
@@ -229,6 +235,7 @@ export interface Config {
 export interface NewApiUiSettings {
   undoMs?: number
   undoEnabled?: boolean
+  soundEnabled?: boolean
 }
 
 /** How an instance's gateway traffic reaches the network. */
@@ -412,7 +419,9 @@ export const Config: z<Config> = z.object({
   ui: z.object({
     undoMs: z.number().step(500).min(1000).max(60000).default(7000),
     undoEnabled: z.boolean().default(true),
-  }).default({ undoMs: 7000, undoEnabled: true }),
+    soundEnabled: z.boolean().default(true),
+  }).default({ undoMs: 7000, undoEnabled: true, soundEnabled: true }),
+  trash: z.array(instanceSchema).default([]),
 })
 
 /**

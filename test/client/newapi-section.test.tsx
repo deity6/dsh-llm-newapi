@@ -341,23 +341,46 @@ describe('humanized deletion and validation (v0.9.8)', () => {
     expect(api.settings.mutate).not.toHaveBeenCalled()
   })
 
-  it('removes the instance only after the big-window confirm', async () => {
+  it('moves the instance into the recycle bin and restores it from there', async () => {
     const api = wireFace()
     render(<NewApiSection api={api as never} t={t} autoSave={false} />)
     await waitFor(() => { expect(screen.getByLabelText(t('removeInstance'))).toBeTruthy() })
-    // The trash button opens the modal; the instance is still there.
+    // Deleting moves the instance to the bin (recoverable): no dialog, the
+    // card disappears and the bin badge shows 1.
     fireEvent.click(screen.getByLabelText(t('removeInstance')))
-    await waitFor(() => { expect(screen.getByRole('dialog')).toBeTruthy() })
-    expect(screen.queryByText(t('noInstances'))).toBeNull()
-    // Cancelling closes the modal and leaves the instance untouched.
-    fireEvent.click(within(screen.getByRole('dialog')).getByText(t('fetchCancel')))
-    await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull() })
-    expect(screen.queryByText(t('noInstances'))).toBeNull()
-    // Confirming (second tap inside the dialog) actually removes it.
-    fireEvent.click(screen.getByLabelText(t('removeInstance')))
-    await waitFor(() => { expect(screen.getByRole('dialog')).toBeTruthy() })
-    fireEvent.click(within(screen.getByRole('dialog')).getByText(t('confirmRemove')))
     await waitFor(() => { expect(screen.getByText(t('noInstances'))).toBeTruthy() })
+    // The toast carries the instance label after the fixed prefix.
+    await waitFor(() => { expect(screen.getByText(new RegExp(t('movedToTrash')))).toBeTruthy() })
+    // Open the bin: the instance is listed with its gateway address.
+    fireEvent.click(screen.getByLabelText(t('trashTitle')))
+    await waitFor(() => { expect(screen.getByRole('dialog')).toBeTruthy() })
+    expect(screen.getByText(t('trashRestore'))).toBeTruthy()
+    // Restoring puts it back; the panel stays open and turns empty.
+    fireEvent.click(screen.getByText(t('trashRestore')))
+    await waitFor(() => { expect(screen.getByText(t('trashEmpty'))).toBeTruthy() })
+    expect(screen.getByText(t('restoredInstance'))).toBeTruthy()
+    expect(screen.queryByText(t('noInstances'))).toBeNull()
+  })
+
+  it('permanently deletes only after the big-window confirm in the bin', async () => {
+    const api = wireFace()
+    render(<NewApiSection api={api as never} t={t} autoSave={false} />)
+    await waitFor(() => { expect(screen.getByLabelText(t('removeInstance'))).toBeTruthy() })
+    fireEvent.click(screen.getByLabelText(t('removeInstance')))
+    await waitFor(() => { expect(screen.getByText(t('noInstances'))).toBeTruthy() })
+    fireEvent.click(screen.getByLabelText(t('trashTitle')))
+    await waitFor(() => { expect(screen.getByRole('dialog')).toBeTruthy() })
+    // Permanent delete opens the confirm dialog; cancelling keeps the item.
+    fireEvent.click(screen.getByText(t('trashDelete')))
+    await waitFor(() => { expect(screen.getByText(t('trashPermanentTitle'))).toBeTruthy() })
+    fireEvent.click(within(screen.getAllByRole('dialog').at(-1) as HTMLElement).getByText(t('fetchCancel')))
+    await waitFor(() => { expect(screen.queryByText(t('trashPermanentTitle'))).toBeNull() })
+    expect(screen.getByText(t('trashRestore'))).toBeTruthy()
+    // Confirming removes it for good.
+    fireEvent.click(screen.getByText(t('trashDelete')))
+    await waitFor(() => { expect(screen.getByText(t('trashPermanentTitle'))).toBeTruthy() })
+    fireEvent.click(within(screen.getAllByRole('dialog').at(-1) as HTMLElement).getByText(t('confirmRemove')))
+    await waitFor(() => { expect(screen.getByText(t('trashEmpty'))).toBeTruthy() })
   })
 
   it('removes a model row with an undo toast that restores it', async () => {

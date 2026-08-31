@@ -292,7 +292,7 @@ const SECTION_CSS = `
 .newapi-toast-undo {
   flex: none; padding: 2px 8px; border: none; border-radius: 6px;
   background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-static-deepseek-300);
   font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
 }
 .newapi-toast-undo:hover { background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); }
@@ -348,6 +348,7 @@ const SECTION_CSS = `
   display: flex; align-items: center; justify-content: center;
   animation: newapi-backdrop-in .15s ease;
 }
+.newapi-modal-backdrop--top { z-index: 950; }
 @keyframes newapi-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
 .newapi-modal-backdrop.newapi-modal--leaving { opacity: 0; transition: opacity .2s ease; }
 .newapi-modal {
@@ -377,12 +378,46 @@ const SECTION_CSS = `
   border-radius: 50%; background: var(--dsw-alias-label-tertiary);
   transition: transform .18s ease, background .18s ease;
 }
-.newapi-switch--on { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
+.newapi-switch--on { background: var(--dsw-static-deepseek-500); border-color: var(--dsw-static-deepseek-500); }
 .newapi-switch--on .newapi-switch-knob { transform: translateX(14px); background: #fff; }
 .newapi-probecheck { font-size: 12px; color: var(--dsw-alias-label-tertiary); line-height: 18px; }
 /* Row delete fade-out. */
 .newapi-entry { transition: opacity .2s ease, transform .2s ease; }
 .newapi-entry--leaving { opacity: 0; transform: translateX(8px); }
+/* Fetch spinner (获取模型 button). */
+.newapi-spinner {
+  box-sizing: border-box; width: 12px; height: 12px; display: inline-block;
+  border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%;
+  margin-right: 6px; vertical-align: -2px;
+  animation: newapi-spin .7s linear infinite;
+}
+@keyframes newapi-spin { to { transform: rotate(360deg); } }
+/* Recycle-bin button (toolbar) with count badge. */
+.newapi-trashbtn {
+  position: relative; width: 30px; height: 30px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 8px; background: transparent;
+  color: var(--dsw-alias-label-tertiary); cursor: pointer;
+}
+.newapi-trashbtn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.newapi-trashbtn--has { color: var(--dsw-alias-label-primary); }
+.newapi-trashbtn-ico { width: 15px; height: 15px; }
+.newapi-trashbtn-badge {
+  position: absolute; top: -4px; right: -6px; min-width: 15px; height: 15px;
+  box-sizing: border-box; padding: 0 4px; border-radius: 999px;
+  background: var(--dsw-alias-state-error-primary); color: #fff;
+  font-size: 10px; line-height: 15px; font-weight: 700; text-align: center;
+}
+/* Recycle-bin panel list. */
+.newapi-modal--trash { width: min(480px, calc(100vw - 48px)); }
+.newapi-trash-list { list-style: none; margin: 0 0 14px; padding: 0; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.newapi-trash-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
+}
+.newapi-trash-item-name { flex: none; max-width: 30%; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.newapi-trash-item-sub { flex: 1; min-width: 0; font-size: 12px; color: var(--dsw-alias-label-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.newapi-trash-item-actions { flex: none; display: flex; gap: 6px; }
 `
 
 /** Required services (cordis fiber inject): the section slot, copy, and the wire face. */
