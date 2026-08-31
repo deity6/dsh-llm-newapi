@@ -20,6 +20,7 @@ import type { NewApiCatalogModel, NewApiConnectionOptions } from './adapter.js';
 import type { ProviderHints } from './types.js';
 export { DEFAULT_CONTEXT_WINDOW, DEFAULT_MODEL_EXCLUDE_PATTERNS, DEFAULT_PROVIDER_HINTS, DEFAULT_STREAM_IDLE_TIMEOUT_MS, matchModelsDev, modelNameFromId, NewApiAdapter, normalizeBaseUrl, PKG, } from './adapter.js';
 export { serializeRequest } from './serialize.js';
+export { anthropicEventsToWire, serializeAnthropicRequest } from './anthropic.js';
 export type { NewApiAdapterOptions, NewApiCatalogModel, NewApiConnectionOptions } from './adapter.js';
 export type * from './types.js';
 export { parseChannelConn, registerChannelConnParser } from './channel-conn.js';
@@ -72,6 +73,19 @@ export interface NewApiInstanceConfig {
      * `apiKeyEnv` the stored profile names.
      */
     apiKeyEnv?: string;
+    /**
+     * Wire protocol spoken with this gateway: OpenAI-compatible
+     * `/chat/completions` (default) or Anthropic Messages (`/v1/messages`).
+     */
+    protocol?: 'openai' | 'anthropic';
+    /**
+     * Extra API keys for the same instance. NewAPI groups keys into buckets,
+     * each seeing a different model set — discovery merges every key's listing
+     * and requests route per-model to the key that sees it. Each entry may
+     * name its credential reference via `apiKeyEnv`; defaults to
+     * `newapi_<id>_<keyId>`.
+     */
+    keys?: NewApiInstanceKeyConfig[];
     /** Gateway base including the `/v1` prefix. */
     baseURL?: string;
     /** Advisory models shown by discovery consumers; defaults to none. */
@@ -173,6 +187,13 @@ export interface NewApiUiSettings {
     undoMs?: number;
     undoEnabled?: boolean;
     soundEnabled?: boolean;
+}
+/** One extra API key of an instance (see {@link NewApiInstanceConfig.keys}). */
+export interface NewApiInstanceKeyConfig {
+    /** Stable local id (e.g. `k2`) used in the credential reference and UI. */
+    id: string;
+    /** Credential reference override; defaults to `newapi_<id>_<keyId>`. */
+    apiKeyEnv?: string;
 }
 /** How an instance's gateway traffic reaches the network. */
 export type ProxyMode = 'system' | 'direct' | 'custom';

@@ -93,6 +93,8 @@ function toDrafts(source: unknown): InstanceDraft[] {
     id: 'default',
     displayName: 'NewAPI',
     baseURL: typeof value.baseURL === 'string' ? value.baseURL : '',
+    protocol: 'openai',
+    keys: [],
     models: Array.isArray(value.models)
       ? value.models.filter(entry => typeof entry === 'object' && entry !== null && !Array.isArray(entry)) as ModelDraft[]
       : [],
@@ -108,6 +110,16 @@ function draftOf(entry: Record<string, unknown>): InstanceDraft {
     id: typeof entry.id === 'string' ? entry.id : '',
     displayName: typeof entry.displayName === 'string' ? entry.displayName : '',
     baseURL: typeof entry.baseURL === 'string' ? entry.baseURL : '',
+    protocol: entry.protocol === 'anthropic' ? 'anthropic' as const : 'openai' as const,
+    keys: Array.isArray(entry.keys)
+      ? entry.keys
+        .filter(key => typeof key === 'object' && key !== null && !Array.isArray(key))
+        .map(key => ({
+          id: typeof key.id === 'string' ? key.id : '',
+          ...typeof key.apiKeyEnv === 'string' ? { apiKeyEnv: key.apiKeyEnv } : {},
+        }))
+        .filter(key => key.id.trim().length > 0)
+      : [],
     models: Array.isArray(entry.models)
       ? entry.models.filter(model => typeof model === 'object' && model !== null && !Array.isArray(model)) as ModelDraft[]
       : [],
@@ -122,6 +134,8 @@ function blankDraft(): InstanceDraft {
     id: `gw-${Date.now().toString(36)}`,
     displayName: '',
     baseURL: '',
+    protocol: 'openai',
+    keys: [],
     models: [],
     proxyMode: 'system',
     proxyUrl: DEFAULT_PROXY_URL,
@@ -159,6 +173,14 @@ function serializeInstance(draft: InstanceDraft): Record<string, unknown> {
     // joins credentials whose `apiKeyEnv` the stored profile names, so
     // writing it here is what lights up its configured/missing dot.
     apiKeyEnv: clientRefOf(id),
+    ...draft.protocol === 'anthropic' ? { protocol: 'anthropic' as const } : {},
+    ...draft.keys.length > 0
+      ? {
+        keys: draft.keys
+          .map(key => ({ id: key.id.trim(), ...key.apiKeyEnv?.trim().length ? { apiKeyEnv: key.apiKeyEnv.trim() } : {} }))
+          .filter(key => key.id.length > 0),
+      }
+      : {},
     ...draft.displayName.trim().length > 0 ? { displayName: draft.displayName.trim() } : {},
     ...draft.baseURL.trim().length > 0 ? { baseURL: draft.baseURL.trim() } : {},
     models,
@@ -399,8 +421,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     markDirty()
   }
 
-  const handlePendingKey = (index: number, value: string): void => {
-    const ref = clientRefOf(instances[index]?.id ?? '')
+  const handlePendingKey = (index: number, ref: string, value: string): void => {
     setPendingKeys(current => {
       const next = new Map(current)
       if (value.trim().length === 0) next.delete(ref)
@@ -646,7 +667,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
               fetchModelParams={fetchModelParams}
               probe={probe}
               onPatch={(patch) => { patchInstance(safeActiveIndex, patch) }}
-              onPendingKey={(value) => { handlePendingKey(safeActiveIndex, value) }}
+              onPendingKey={(ref, value) => { handlePendingKey(safeActiveIndex, ref, value) }}
               onRequestRemove={() => { removeInstance(safeActiveIndex) }}
               notify={pushToast}
               undoEnabled={ui.undoEnabled}

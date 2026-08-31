@@ -40,6 +40,17 @@ export interface InstanceDraft {
   displayName: string
   /** Gateway base including the `/v1` prefix. */
   baseURL: string
+  /**
+   * Wire protocol: OpenAI-compatible `/chat/completions` (default) or
+   * Anthropic Messages (`/v1/messages`).
+   */
+  protocol: 'openai' | 'anthropic'
+  /**
+   * Extra API keys. NewAPI groups keys into buckets, each seeing a different
+   * model set; the key id (k2, k3, …) forms the credential reference
+   * `newapi_<id>_<keyId>`.
+   */
+  keys: Array<{ id: string; apiKeyEnv?: string }>
   models: ModelDraft[]
   proxyMode: InstanceProxyMode
   proxyUrl: string
@@ -199,8 +210,8 @@ export interface InstanceEditorProps {
   ) => Promise<{ ok: true; value: ProbeResult } | { ok: false; error: { message: string } }>
   /** Persist a draft field change up. */
   onPatch: (patch: Partial<InstanceDraft>) => void
-  /** Lift the pending key draft up (empty string = nothing to store). */
-  onPendingKey: (value: string) => void
+  /** Lift a pending key draft up by credential ref (empty string = nothing to store). */
+  onPendingKey: (ref: string, value: string) => void
   /** Ask the parent to open the big-window deletion confirm. */
   onRequestRemove: () => void
   /**
@@ -222,6 +233,8 @@ export interface InstanceEditorProps {
 export function InstanceEditor(props: InstanceEditorProps): ReactNode {
   const { index, draft, keyConfigured, keyLocked, api, t, fetchModelParams, probe, onPatch, onPendingKey, onRequestRemove, notify, undoEnabled } = props
   const [keyDraft, setKeyDraft] = useState('')
+  // Per extra-key password drafts: keyId → typed (unsaved) secret.
+  const [keyDrafts, setKeyDrafts] = useState<Readonly<Record<string, string>>>({})
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set())
   const [editing, setEditing] = useState<ReadonlyMap<string, string>>(new Map())
   const [candidates, setCandidates] = useState<readonly DiscoveredModelView[] | undefined>(undefined)
@@ -319,6 +332,32 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
       } else {
         notify(t('removedHeader').replace('{name}', label), 'info')
       }
+    }
+  }
+
+  // Extra keys: pick the smallest unused k2/k3/… id and append a row. The
+  // credential reference derives from the instance id + key id, mirroring
+  // the host's resolveAdapterOptions.
+  const addKey = (): void => {
+    const used = new Set(draft.keys.map(key => key.id))
+    let n = 2
+    while (used.has(`k${String(n)}`)) n++
+    const keyId = `k${String(n)}`
+    patch({ keys: [...draft.keys, { id: keyId }] })
+    notify(`${t('addKey')} ${keyId}`, 'info')
+  }
+
+  const removeKey = (keyIndex: number): void => {
+    const removed = draft.keys[keyIndex]
+    patch({ keys: draft.keys.filter((_, at) => at !== keyIndex) })
+    if (removed !== undefined) {
+      setKeyDrafts(current => {
+        const next = { ...current }
+        delete next[removed.id]
+        return next
+      })
+      // Drop any pending secret for the removed ref.
+      onPendingKey(clientRefOf(`${draft.id}_${removed.id}`), '')
     }
   }
 
@@ -558,8 +597,60 @@ export function InstanceEditor(props: InstanceEditorProps): ReactNode {
             ? t('keyEnvLocked')
             : keyConfigured === true ? t('keyStored') : keyConfigured === false ? t('keyMissing') : t('keyPlaceholder')}
           value={keyDraft}
-          onChange={(event) => { setKeyDraft(event.target.value); onPendingKey(event.target.value) }}
+          onChange={(event) => { setKeyDraft(event.target.value); onPendingKey(clientRefOf(draft.id), event.target.value) }}
         />
+      </div>
+
+      <div className="newapi-keys">
+        <div className="newapi-catalog-head">
+          <span className="newapi-catalog-title">{t('keysTitle')}</span>
+          <div className="newapi-catalog-actions" style={{ display: 'flex', gap: 4 }}>
+            <button type="button" className="newapi-linkbutton" onClick={addKey}>
+              {t('addKey')}
+            </button>
+          </div>
+        </div>
+        <p className="newapi-hint">{t('keysHint')}</p>
+        {draft.keys.length === 0 ? <p className="newapi-empty">{t('keysEmpty')}</p> : draft.keys.map((key, keyIndex) => (
+          <div key={key.id} className="newapi-keyrow">
+            <span className="newapi-keyrow-id" title={key.apiKeyEnv}>{key.id}</span>
+            <input
+              className="newapi-input" type="password" autoComplete="off"
+              aria-label={`${t('keyInput')} ${key.id}`}
+              placeholder={t('keyPlaceholder')}
+              value={keyDrafts[key.id] ?? ''}
+              onChange={(event) => {
+                setKeyDrafts(current => ({ ...current, [key.id]: event.target.value }))
+                onPendingKey(clientRefOf(`${draft.id}_${key.id}`), event.target.value)
+              }}
+            />
+            <button
+              type="button" className="newapi-iconbutton newapi-iconbutton--danger"
+              aria-label={`${t('removeKey')} ${key.id}`}
+              title={t('removeKey')}
+              onClick={() => { removeKey(keyIndex) }}
+            >
+              <IconTrash />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div className="newapi-field">
+        <label htmlFor={`newapi-instance-protocol-${index}`}>{t('protocol')}</label>
+        <select
+          id={`newapi-instance-protocol-${index}`} className="newapi-input newapi-select"
+          value={draft.protocol}
+          onChange={(event) => {
+            const protocol = event.target.value === 'anthropic' ? 'anthropic' as const : 'openai' as const
+            patch({ protocol })
+            notify(`${t('protocol')} → ${protocol === 'anthropic' ? t('protocolAnthropic') : t('protocolOpenai')}`, 'info')
+          }}
+        >
+          <option value="openai">{t('protocolOpenai')}</option>
+          <option value="anthropic">{t('protocolAnthropic')}</option>
+        </select>
+        <p className="newapi-hint">{t('protocolHint')}</p>
       </div>
 
       <div className="newapi-field">

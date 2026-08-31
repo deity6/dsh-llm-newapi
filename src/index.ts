@@ -47,6 +47,7 @@ export {
   PKG,
 } from './adapter.ts'
 export { serializeRequest } from './serialize.ts'
+export { anthropicEventsToWire, serializeAnthropicRequest } from './anthropic.ts'
 export type { NewApiAdapterOptions, NewApiCatalogModel, NewApiConnectionOptions } from './adapter.ts'
 export type * from './types.ts'
 export { parseChannelConn, registerChannelConnParser } from './channel-conn.ts'
@@ -133,6 +134,19 @@ export interface NewApiInstanceConfig {
    * `apiKeyEnv` the stored profile names.
    */
   apiKeyEnv?: string
+  /**
+   * Wire protocol spoken with this gateway: OpenAI-compatible
+   * `/chat/completions` (default) or Anthropic Messages (`/v1/messages`).
+   */
+  protocol?: 'openai' | 'anthropic'
+  /**
+   * Extra API keys for the same instance. NewAPI groups keys into buckets,
+   * each seeing a different model set — discovery merges every key's listing
+   * and requests route per-model to the key that sees it. Each entry may
+   * name its credential reference via `apiKeyEnv`; defaults to
+   * `newapi_<id>_<keyId>`.
+   */
+  keys?: NewApiInstanceKeyConfig[]
   /** Gateway base including the `/v1` prefix. */
   baseURL?: string
   /** Advisory models shown by discovery consumers; defaults to none. */
@@ -236,6 +250,14 @@ export interface NewApiUiSettings {
   undoMs?: number
   undoEnabled?: boolean
   soundEnabled?: boolean
+}
+
+/** One extra API key of an instance (see {@link NewApiInstanceConfig.keys}). */
+export interface NewApiInstanceKeyConfig {
+  /** Stable local id (e.g. `k2`) used in the credential reference and UI. */
+  id: string
+  /** Credential reference override; defaults to `newapi_<id>_<keyId>`. */
+  apiKeyEnv?: string
 }
 
 /** How an instance's gateway traffic reaches the network. */
@@ -382,10 +404,15 @@ function systemProxyUrl(): string | undefined {
 }
 
 /** One gateway instance entry; mirrors the legacy flat Config fields. */
-const instanceSchema: z<NewApiInstanceConfig> = z.object({
+const instanceSchema = z.object({
   id: z.string().required(),
   displayName: z.string(),
   apiKeyEnv: z.string(),
+  protocol: z.string(),
+  keys: z.array(z.object({
+    id: z.string(),
+    apiKeyEnv: z.string(),
+  })).default([]),
   baseURL: z.string(),
   models: z.array(catalogModel).default([]),
   modelExcludePatterns: z.array(z.string()).default([...DEFAULT_MODEL_EXCLUDE_PATTERNS]),
@@ -399,7 +426,7 @@ const instanceSchema: z<NewApiInstanceConfig> = z.object({
   }),
   retryPolicy: RetryPolicySchema,
   headers: z.dict(z.string()).default({}),
-})
+}) as unknown as z<NewApiInstanceConfig>
 
 export const Config: z<Config> = z.object({
   instances: z.array(instanceSchema).default([]),
@@ -552,9 +579,19 @@ export function resolveAdapterOptions(
   } else if (proxy.mode === 'system') {
     proxyUrl = systemProxyUrl()
   }
+  const instanceConfig = config as NewApiInstanceConfig
   return {
     baseURL: normalizeBaseUrl(rawBase),
     apiKeyRef: ref,
+    ...instanceConfig.protocol === 'anthropic' ? { protocol: 'anthropic' as const } : {},
+    ...instanceConfig.keys !== undefined && instanceConfig.keys.length > 0 ? {
+      keys: instanceConfig.keys.map(entry => ({
+        id: entry.id,
+        ref: credentialRef(
+          entry.apiKeyEnv?.trim().length ? entry.apiKeyEnv.trim() : `${String(ref)}_${sanitizeInstanceId(entry.id).replace(/-/g, '_')}`,
+        ),
+      })),
+    } : {},
     models: resolveModels(config.models),
     modelExcludePatterns,
     defaultContextWindow,
@@ -624,13 +661,13 @@ export function apply(ctx: Context, config: Config): void {
   // Validate the initial composition (fail loud on a bad static config).
   for (const entry of entryList()) resolveAdapterOptions(entry.instance, launchEnvironmentOf(ctx), refForEntry(entry.instance))
 
-  const resolveApiKey = async (connection: ResolvedNewApiOptions): Promise<string> => {
+  const resolveApiKey = async (connection: ResolvedNewApiOptions, keyRef?: CredentialRef): Promise<string> => {
     // Every credential fact comes from the caller's snapshot, so a rejected
     // settings generation cannot leak its key onto the previous endpoint.
     // The credentials store is the only source: the web settings page owns
     // the value, and this plugin deliberately reads no environment variable
     // for it (a stray export must not shadow a web-configured key).
-    const ref = connection.apiKeyRef
+    const ref = keyRef ?? connection.apiKeyRef
     const credentials = ctx.get('credentials')
     if (credentials !== undefined) {
       const hit = await credentials.resolve(ref)

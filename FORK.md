@@ -229,3 +229,21 @@ registerChannelConnParser('mygw_token', (obj) => {
     deepseek-300（实测变量存在性后修正）。
   - 回归：client 16 例全绿（回收站移入/恢复/永久删除弹窗）；trash 段 round-trip
     单测通过（trash 不注册）。
+- `0.9.11`：**协议选项（Anthropic Messages）+ 多密钥支持**。
+  - **协议选项**：实例新增 `protocol: openai|anthropic`（默认 openai）。Anthropic 分支
+    用 `serializeAnthropicRequest`（Messages 序列化：system 合并、tool_use input
+    JSON.parse、tool_result 进 user 消息、max_tokens 必填缺省 8192）→ POST
+    `/messages`（`x-api-key` + `anthropic-version: 2023-06-01`，无 Bearer）→
+    `anthropicEventsToWire` 把事件流转成 OpenAI WireChunk（text_delta→content、
+    thinking_delta→reasoning_content、input_json_delta→tool_calls 片段、
+    end_turn→stop、usage 减 cache）→ 复用共享 translate 组装。`parseSse` 增加
+    `expectDone` 参数（Anthropic 流无 [DONE] 哨兵）。设计参考 CC-Switch /
+    claude-model-switch 的协议切换思路。
+  - **多密钥**：实例新增 `keys: [{id, apiKeyEnv?}]`（k2/k3…，凭据 ref 默认
+    `newapi_<id>_<keyId>`）。发现模型时**每个密钥各拉一次 /models 合并去重**，
+    构建模型→密钥路由表（`modelKey`）；请求按模型路由到能访问它的密钥，
+    未发现的模型回退主密钥。`resolveApiKey` 增加 `keyRef?` 参数。
+  - **client**：实例卡新增「接口协议」选择与「附加密钥」区（添加 k2/k3、逐行
+    密钥输入、删除清 pending）；草稿/序列化 round-trip；legacy 分支补全字段。
+  - 回归：新增 `protocol-smoke`（序列化/事件翻译/多密钥合并+路由 17 断言）；
+    vitest 16 例 + 全部 smoke 绿。

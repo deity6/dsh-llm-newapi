@@ -381,6 +381,10 @@ const SECTION_CSS = `
 .newapi-switch--on { background: var(--dsw-static-deepseek-500); border-color: var(--dsw-static-deepseek-500); }
 .newapi-switch--on .newapi-switch-knob { transform: translateX(14px); background: #fff; }
 .newapi-probecheck { font-size: 12px; color: var(--dsw-alias-label-tertiary); line-height: 18px; }
+/* Extra-key rows. */
+.newapi-keys { margin: 4px 0 12px; }
+.newapi-keyrow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 6px; margin-bottom: 6px; }
+.newapi-keyrow-id { flex: none; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--dsw-alias-label-tertiary); padding: 0 2px; }
 /* Row delete fade-out. */
 .newapi-entry { transition: opacity .2s ease, transform .2s ease; }
 .newapi-entry--leaving { opacity: 0; transform: translateX(8px); }

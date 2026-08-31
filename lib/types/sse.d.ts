@@ -18,6 +18,9 @@ export declare const DONE = "[DONE]";
  * without it (truncated response — the model call cannot be trusted).
  * @param stream - raw SSE bytes; reads may split anywhere, including mid-UTF-8 sequence.
  * @param onComment - optional transport-activity callback; comments never enter the yielded payload stream.
+ * @param expectDone - OpenAI-compatible streams close with the literal `[DONE]`;
+ *   when true (default) EOF before it is truncation. Anthropic streams have no
+ *   sentinel — pass false to treat EOF as a normal close.
  * @returns each event's data payload in arrival order, the `[DONE]` sentinel last.
  */
-export declare function parseSse(stream: ReadableStream<BufferSource>, onComment?: (comment: string) => void): AsyncGenerator<string>;
+export declare function parseSse(stream: ReadableStream<BufferSource>, onComment?: (comment: string) => void, expectDone?: boolean): AsyncGenerator<string>;

@@ -64,6 +64,22 @@ export interface NewApiConnectionOptions {
      * key is not a configuration value.
      */
     apiKeyRef: CredentialRef;
+    /**
+     * Wire protocol spoken with this gateway: OpenAI-compatible
+     * `/chat/completions` (default) or Anthropic Messages (`/v1/messages`).
+     * NewAPI-style relay stations often front both on the same endpoint.
+     */
+    protocol?: 'openai' | 'anthropic';
+    /**
+     * Extra API keys for the same instance. NewAPI groups keys into buckets,
+     * each seeing a different model set, so discovery merges every key's
+     * `/models` listing and requests route per-model to the key that sees it.
+     * The primary {@link apiKeyRef} is implied and always first.
+     */
+    keys?: readonly {
+        id: string;
+        ref: CredentialRef;
+    }[];
     /** Advisory models exposed to discovery consumers; requests remain unrestricted. */
     models: readonly NewApiCatalogModel[];
     /**
@@ -113,8 +129,10 @@ export interface NewApiAdapterOptions {
      * snapshot is passed in — never re-read — so the key can only ever come
      * from the same resolution as the endpoint it is sent to. Throws `LlmError`
      * `MISSING_CREDENTIAL` when the credentials store holds no value.
+     * @param connection - the resolution snapshot.
+     * @param keyRef - which reference to resolve; defaults to `connection.apiKeyRef`.
      */
-    resolveApiKey: (connection: NewApiConnectionOptions) => Promise<string>;
+    resolveApiKey: (connection: NewApiConnectionOptions, keyRef?: CredentialRef) => Promise<string>;
     /**
      * Name the provider route that officially serves a model id, so a
      * multi-provider catalog match can put the vendor's own facts first.
@@ -197,7 +215,16 @@ export declare function httpErrorCode(status: number, error?: WireError['error']
  */
 export declare class NewApiAdapter extends LlmAdapter {
     private readonly config;
+    /**
+     * Multi-key routing: model id → credential reference that can serve it,
+     * built by the last discovery over every key's `/models` listing. A model
+     * visible to several keys keeps the first (primary-first order); a model
+     * never discovered falls back to the primary key at request time.
+     */
+    private readonly modelKey;
     constructor(config: NewApiAdapterOptions);
+    /** Test hook: the model→keyRef routing table built by the last discovery. */
+    get routingSnapshotForTest(): ReadonlyMap<string, CredentialRef>;
     providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(_provider: string): ResolvedRetryPolicy;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
@@ -219,6 +246,27 @@ export declare class NewApiAdapter extends LlmAdapter {
      * the settings-namespace discovery the plugin registered. A draft being
      * edited supplies its own base and one-shot credential; otherwise both
      * come from the current connection snapshot.
+     * @param request - the discovery draft (endpoint, protocol, credential, cancellation).
+     * @returns the advertised models, deduplicated by the runtime, enriched
+     *   with context/maxTokens facts from the configured catalog when ids match.
+     */
+    /**
+     * Fetch and parse one gateway `/models` listing under one key.
+     * @param base - normalized gateway base (with `/v1`).
+     * @param apiKey - the key this listing was fetched with.
+     * @param connection - the resolution snapshot (headers/proxy).
+     * @param signal - optional cancellation.
+     * @returns the raw listing.
+     */
+    private fetchModelList;
+    /**
+     * Interrogate one gateway endpoint for the models it advertises, serving
+     * the settings-namespace discovery the plugin registered. A draft being
+     * edited supplies its own base and one-shot credential; otherwise both
+     * come from the current connection snapshot. With multiple keys configured
+     * the listing is fetched per key and merged (NewAPI keys bucket by group,
+     * each seeing a different model set); the model→key map feeds request
+     * routing.
      * @param request - the discovery draft (endpoint, protocol, credential, cancellation).
      * @returns the advertised models, deduplicated by the runtime, enriched
      *   with context/maxTokens facts from the configured catalog when ids match.
@@ -292,4 +340,19 @@ export declare class NewApiAdapter extends LlmAdapter {
     private prioritizeOfficial;
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
     private request;
+    /**
+     * Anthropic Messages variant of {@link request}: serializes the harness
+     * call onto Messages, posts to `/messages` with `x-api-key` +
+     * `anthropic-version` (no Bearer header), and funnels the Anthropic event
+     * stream through the shared translate assembler via
+     * {@link anthropicEventsToWire}.
+     */
+    private anthropicRequest;
+    /**
+     * Turn a non-OK gateway response into a typed {@link LlmError}, parsing the
+     * error body when it is well-formed. Shared by both protocol branches.
+     * @param response - the failed gateway response.
+     * @param base - the gateway base for the message prefix.
+     */
+    private raiseForResponse;
 }

@@ -54,6 +54,7 @@ import type {
   WireModelList,
 } from './types.ts'
 import { defaultReasoningEffortsFor } from './efforts.ts'
+import { anthropicEventsToWire, serializeAnthropicRequest } from './anthropic.ts'
 
 /** Prefix for adapter-raised diagnostics. */
 export const PKG = 'llm-newapi'
@@ -109,6 +110,19 @@ export interface NewApiConnectionOptions {
    * key is not a configuration value.
    */
   apiKeyRef: CredentialRef
+  /**
+   * Wire protocol spoken with this gateway: OpenAI-compatible
+   * `/chat/completions` (default) or Anthropic Messages (`/v1/messages`).
+   * NewAPI-style relay stations often front both on the same endpoint.
+   */
+  protocol?: 'openai' | 'anthropic'
+  /**
+   * Extra API keys for the same instance. NewAPI groups keys into buckets,
+   * each seeing a different model set, so discovery merges every key's
+   * `/models` listing and requests route per-model to the key that sees it.
+   * The primary {@link apiKeyRef} is implied and always first.
+   */
+  keys?: readonly { id: string; ref: CredentialRef }[]
   /** Advisory models exposed to discovery consumers; requests remain unrestricted. */
   models: readonly NewApiCatalogModel[]
   /**
@@ -159,8 +173,10 @@ export interface NewApiAdapterOptions {
    * snapshot is passed in — never re-read — so the key can only ever come
    * from the same resolution as the endpoint it is sent to. Throws `LlmError`
    * `MISSING_CREDENTIAL` when the credentials store holds no value.
+   * @param connection - the resolution snapshot.
+   * @param keyRef - which reference to resolve; defaults to `connection.apiKeyRef`.
    */
-  resolveApiKey: (connection: NewApiConnectionOptions) => Promise<string>
+  resolveApiKey: (connection: NewApiConnectionOptions, keyRef?: CredentialRef) => Promise<string>
   /**
    * Name the provider route that officially serves a model id, so a
    * multi-provider catalog match can put the vendor's own facts first.
@@ -505,8 +521,21 @@ function gatewayHeaders(
  * map to `ABORTED`; the configured per-read idle watchdog maps to `TIMEOUT`.
  */
 export class NewApiAdapter extends LlmAdapter {
+  /**
+   * Multi-key routing: model id → credential reference that can serve it,
+   * built by the last discovery over every key's `/models` listing. A model
+   * visible to several keys keeps the first (primary-first order); a model
+   * never discovered falls back to the primary key at request time.
+   */
+  private readonly modelKey = new Map<string, CredentialRef>()
+
   constructor(private readonly config: NewApiAdapterOptions) {
     super()
+  }
+
+  /** Test hook: the model→keyRef routing table built by the last discovery. */
+  get routingSnapshotForTest(): ReadonlyMap<string, CredentialRef> {
+    return this.modelKey
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -618,23 +647,29 @@ export class NewApiAdapter extends LlmAdapter {
    * @returns the advertised models, deduplicated by the runtime, enriched
    *   with context/maxTokens facts from the configured catalog when ids match.
    */
-  async discoverModels(request: LlmModelDiscoveryRequest): Promise<readonly LlmDiscoveredModel[]> {
-    const connection = this.config.options()
-    const base = request.baseURL !== undefined && request.baseURL.length > 0
-      ? normalizeBaseUrl(request.baseURL)
-      : connection.baseURL
-    const apiKey = request.apiKey !== undefined
-      ? assertUsableApiKey(request.apiKey, PKG, 'the draft credential')
-      : await this.config.resolveApiKey(connection)
+  /**
+   * Fetch and parse one gateway `/models` listing under one key.
+   * @param base - normalized gateway base (with `/v1`).
+   * @param apiKey - the key this listing was fetched with.
+   * @param connection - the resolution snapshot (headers/proxy).
+   * @param signal - optional cancellation.
+   * @returns the raw listing.
+   */
+  private async fetchModelList(
+    base: string,
+    apiKey: string,
+    connection: NewApiConnectionOptions,
+    signal: AbortSignal | undefined,
+  ): Promise<WireModelList> {
     let response: Response
     try {
       response = await gatewayFetch(`${base}/models`, {
         method: 'GET',
         headers: gatewayHeaders(connection.headers, apiKey, 'application/json', 'application/json'),
-        ...request.signal === undefined ? {} : { signal: request.signal },
+        ...signal === undefined ? {} : { signal },
       }, connection.proxyUrl)
     } catch (error: unknown) {
-      if (request.signal?.aborted) throw error
+      if (signal?.aborted) throw error
       throw new LlmError(`NewAPI model discovery request to ${base} failed`, 'TRANSPORT', { cause: error })
     }
     if (!response.ok) {
@@ -655,16 +690,67 @@ export class NewApiAdapter extends LlmAdapter {
         },
       )
     }
-    let list: WireModelList
     try {
-      list = await response.json() as WireModelList
+      return await response.json() as WireModelList
     } catch {
       throw new LlmError(`NewAPI model discovery from ${base} returned a malformed body`, 'MALFORMED_RESPONSE')
     }
+  }
+
+  /**
+   * Interrogate one gateway endpoint for the models it advertises, serving
+   * the settings-namespace discovery the plugin registered. A draft being
+   * edited supplies its own base and one-shot credential; otherwise both
+   * come from the current connection snapshot. With multiple keys configured
+   * the listing is fetched per key and merged (NewAPI keys bucket by group,
+   * each seeing a different model set); the model→key map feeds request
+   * routing.
+   * @param request - the discovery draft (endpoint, protocol, credential, cancellation).
+   * @returns the advertised models, deduplicated by the runtime, enriched
+   *   with context/maxTokens facts from the configured catalog when ids match.
+   */
+  async discoverModels(request: LlmModelDiscoveryRequest): Promise<readonly LlmDiscoveredModel[]> {
+    const connection = this.config.options()
+    const base = request.baseURL !== undefined && request.baseURL.length > 0
+      ? normalizeBaseUrl(request.baseURL)
+      : connection.baseURL
+    // Draft probes carry their own one-shot credential → single-key listing;
+    // otherwise resolve the primary key and every configured extra key.
+    const keyEntries: Array<{ ref: CredentialRef; key: string }> = []
+    if (request.apiKey !== undefined) {
+      keyEntries.push({
+        ref: connection.apiKeyRef,
+        key: assertUsableApiKey(request.apiKey, PKG, 'the draft credential'),
+      })
+    } else {
+      keyEntries.push({ ref: connection.apiKeyRef, key: await this.config.resolveApiKey(connection) })
+      for (const extra of connection.keys ?? []) {
+        keyEntries.push({ ref: extra.ref, key: await this.config.resolveApiKey(connection, extra.ref) })
+      }
+    }
+
+    const modelKey = new Map<string, CredentialRef>()
+    const seen = new Set<string>()
+    const merged: WireModelList['data'] = []
+    for (const entry of keyEntries) {
+      const list = await this.fetchModelList(base, entry.key, connection, request.signal)
+      for (const item of list.data ?? []) {
+        if (typeof item?.id !== 'string' || item.id.length === 0) continue
+        if (!seen.has(item.id)) {
+          seen.add(item.id)
+          merged.push(item)
+          modelKey.set(item.id, entry.ref)
+        }
+      }
+    }
+    // Rebuild the routing table for the next request.
+    this.modelKey.clear()
+    for (const [id, ref] of modelKey) this.modelKey.set(id, ref)
+
     const catalog = new Map(connection.models.map(model => [model.id, model]))
     const excludes = connection.modelExcludePatterns.map(pattern => pattern.toLowerCase())
     const models: LlmDiscoveredModel[] = []
-    for (const entry of list.data ?? []) {
+    for (const entry of merged) {
       if (typeof entry?.id !== 'string' || entry.id.length === 0) continue
       // A gateway listing cannot say what a model can serve; the id's naming
       // convention is the only signal, so non-chat families (embedding,
@@ -1086,7 +1172,11 @@ export class NewApiAdapter extends LlmAdapter {
     // The key resolves *from this snapshot*, so an endpoint and the secret
     // sent to it can never come from different configuration generations.
     const connection = this.config.options()
-    const apiKey = await this.config.resolveApiKey(connection)
+    // Multi-key routing: the model's owning key (from the last discovery)
+    // when one exists, else the primary reference. An undecorated catalog
+    // row stays on the primary key.
+    const keyRef = this.modelKey.get(options.model) ?? connection.apiKeyRef
+    const apiKey = await this.config.resolveApiKey(connection, keyRef)
     const consumer = new AbortController()
     const upstream = options.signal === undefined
       ? consumer.signal
@@ -1141,8 +1231,11 @@ export class NewApiAdapter extends LlmAdapter {
     apiKey: string,
     onComment: () => void,
   ): AsyncIterable<StreamChunk> {
-    const body = serializeRequest(options)
-    // Prepared outside the try so the TRANSPORT label below covers exactly the
+    if (connection.protocol === 'anthropic') {
+      yield* this.anthropicRequest(options, signal, connection, apiKey, onComment)
+      return
+    }
+    const body = serializeRequest(options)    // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)
     const headers = gatewayHeaders(connection.headers, apiKey, 'application/json', 'text/event-stream')
@@ -1170,28 +1263,90 @@ export class NewApiAdapter extends LlmAdapter {
     }
 
     if (!response.ok) {
-      let message = `NewAPI error (HTTP ${response.status})`
-      let providerError: WireError['error']
-      try {
-        const parsed = await response.json() as WireError
-        providerError = parsed.error
-        if (providerError?.message) message = providerError.message
-      } catch {
-        // Only swallow error-body parsing: the HTTP status still identifies the
-        // failure, so malformed gateway JSON must not mask it.
-      }
-      const delay = providerRetryAfterMs(response.headers.get('retry-after'))
-      const id = requestId(response.headers)
-      throw new LlmError(message, httpErrorCode(response.status, providerError), {
-        status: response.status,
-        ...delay === undefined ? {} : { providerRetryAfterMs: delay },
-        ...id === undefined ? {} : { requestId: id },
-      })
+      await this.raiseForResponse(response, connection.baseURL)
     }
     if (!response.body) {
       throw new LlmError('NewAPI returned no response body', 'EMPTY_RESPONSE')
     }
 
     yield* translate(parseSse(response.body, onComment))
+  }
+
+  /**
+   * Anthropic Messages variant of {@link request}: serializes the harness
+   * call onto Messages, posts to `/messages` with `x-api-key` +
+   * `anthropic-version` (no Bearer header), and funnels the Anthropic event
+   * stream through the shared translate assembler via
+   * {@link anthropicEventsToWire}.
+   */
+  private async * anthropicRequest(
+    options: GenerateOptions,
+    signal: AbortSignal,
+    connection: NewApiConnectionOptions,
+    apiKey: string,
+    onComment: () => void,
+  ): AsyncIterable<StreamChunk> {
+    const body = serializeAnthropicRequest(options)
+    const payload = JSON.stringify(body)
+    const headers: Record<string, string> = {
+      ...gatewayHeaders(connection.headers, apiKey, 'application/json', 'text/event-stream'),
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    }
+    // Anthropic authenticates via x-api-key; drop the OpenAI Bearer header.
+    delete headers.authorization
+
+    let response: Response
+    try {
+      response = await gatewayFetch(`${connection.baseURL}/messages`, {
+        method: 'POST',
+        headers,
+        body: payload,
+        signal,
+      }, connection.proxyUrl)
+    } catch (error: unknown) {
+      if (signal.aborted) throw error
+      throw new LlmError(
+        `NewAPI Anthropic request to ${connection.baseURL} failed`,
+        'TRANSPORT',
+        { cause: error },
+      )
+    }
+
+    if (!response.ok) {
+      await this.raiseForResponse(response, connection.baseURL)
+    }
+    if (!response.body) {
+      throw new LlmError('NewAPI returned no response body', 'EMPTY_RESPONSE')
+    }
+
+    // Anthropic streams carry no [DONE] sentinel — EOF closes the stream.
+    yield* translate(anthropicEventsToWire(parseSse(response.body, onComment, false)))
+  }
+
+  /**
+   * Turn a non-OK gateway response into a typed {@link LlmError}, parsing the
+   * error body when it is well-formed. Shared by both protocol branches.
+   * @param response - the failed gateway response.
+   * @param base - the gateway base for the message prefix.
+   */
+  private async raiseForResponse(response: Response, base: string): Promise<never> {
+    let message = `NewAPI error (HTTP ${response.status})`
+    let providerError: WireError['error']
+    try {
+      const parsed = await response.json() as WireError
+      providerError = parsed.error
+      if (providerError?.message) message = providerError.message
+    } catch {
+      // Only swallow error-body parsing: the HTTP status still identifies the
+      // failure, so malformed gateway JSON must not mask it.
+    }
+    const delay = providerRetryAfterMs(response.headers.get('retry-after'))
+    const id = requestId(response.headers)
+    throw new LlmError(message, httpErrorCode(response.status, providerError), {
+      status: response.status,
+      ...delay === undefined ? {} : { providerRetryAfterMs: delay },
+      ...id === undefined ? {} : { requestId: id },
+    })
   }
 }

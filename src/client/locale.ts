@@ -140,6 +140,15 @@ export const zh = {
   settingsSound: '删除音效',
   soundOn: '已开启删除音效',
   soundOff: '已关闭删除音效',
+  protocol: '接口协议',
+  protocolOpenai: 'OpenAI 兼容（/chat/completions）',
+  protocolAnthropic: 'Anthropic Messages（/v1/messages）',
+  protocolHint: '选 Anthropic 时按 Messages 协议序列化请求并解析其事件流（带 x-api-key 鉴权头）。',
+  keysTitle: '附加密钥',
+  keysHint: '同一供应商可配多个密钥：NewAPI 的密钥分组不同、可见模型也不同，发现模型时会用每个密钥各拉一次并合并。',
+  keysEmpty: '暂无附加密钥：点「添加密钥」新增（用于不同分组的模型）。',
+  addKey: '添加密钥',
+  removeKey: '删除密钥',
 } as const
 
 export type NewApiKey = keyof typeof zh
@@ -281,4 +290,13 @@ export const en: Record<NewApiKey, string> = {
   settingsSound: 'Delete sounds',
   soundOn: 'Delete sounds enabled',
   soundOff: 'Delete sounds disabled',
+  protocol: 'Wire protocol',
+  protocolOpenai: 'OpenAI compatible (/chat/completions)',
+  protocolAnthropic: 'Anthropic Messages (/v1/messages)',
+  protocolHint: 'Anthropic serializes requests onto Messages and parses its event stream (x-api-key auth).',
+  keysTitle: 'Extra keys',
+  keysHint: 'One vendor can hold several keys — NewAPI groups keys into buckets with different model sets; discovery fetches each key once and merges.',
+  keysEmpty: 'No extra keys yet: click "Add key" for models on other key groups.',
+  addKey: 'Add key',
+  removeKey: 'Remove key',
 }

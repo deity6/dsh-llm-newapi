@@ -23,11 +23,15 @@ export const DONE = '[DONE]'
  * without it (truncated response — the model call cannot be trusted).
  * @param stream - raw SSE bytes; reads may split anywhere, including mid-UTF-8 sequence.
  * @param onComment - optional transport-activity callback; comments never enter the yielded payload stream.
+ * @param expectDone - OpenAI-compatible streams close with the literal `[DONE]`;
+ *   when true (default) EOF before it is truncation. Anthropic streams have no
+ *   sentinel — pass false to treat EOF as a normal close.
  * @returns each event's data payload in arrival order, the `[DONE]` sentinel last.
  */
 export async function* parseSse(
   stream: ReadableStream<BufferSource>,
   onComment?: (comment: string) => void,
+  expectDone = true,
 ): AsyncGenerator<string> {
   // Driven by a manual reader loop rather than `pipeThrough`: the web-stream
   // type supplied by the caller (undici's, from the fetch response body) and
@@ -56,14 +60,17 @@ export async function* parseSse(
     }
     // Final flush: the trailing (unterminated-at-EOF or blank-line-terminated)
     // tail. The sentinel here is the successful completion of a truncation-free
-    // stream; its absence means EOF hit before `[DONE]` — a cut-off response.
+    // stream; its absence means EOF hit before `[DONE]` — a cut-off response
+    // (except when the caller opted out of the sentinel contract).
     parser.feed(decoder.decode())
     while (queue.length > 0) {
       const data = queue.shift() as string
       yield data
       if (data === DONE) return
     }
-    throw new LlmError('SSE stream ended without [DONE]', 'STREAM_CLOSED')
+    if (expectDone) {
+      throw new LlmError('SSE stream ended without [DONE]', 'STREAM_CLOSED')
+    }
   } finally {
     // An early return (sentinel reached mid-stream) must cancel the source
     // like the previous pipe chain did; a finished/errored stream ignores it.
