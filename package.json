@@ -4,10 +4,10 @@
   "description": "NewAPI (OpenAI-compatible gateway) chat-completions adapter for the DeepSeek Harness LLM seam. 二改自 wenzetan/dsh-llm-newapi: 增加 newapi_channel_conn 渠道连接描述符解析（可扩展注册其他 newapi 原型站点）、host 端探针(probe)、显式 prepareCall 兼容 dsh-llm >=0.1.x，并将 forward proxy 覆盖到全部 gateway 流量（chat/discovery/probe）。Provider route id 'newapi', display name 'NewAPI'.",
   "type": "module",
   "author": "Deity",
-  "homepage": "https://github.com/Deity/dsh-llm-newapi",
+  "homepage": "https://github.com/deity6/dsh-llm-newapi",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Deity/dsh-llm-newapi.git"
+    "url": "https://github.com/deity6/dsh-llm-newapi.git"
   },
   "forkedFrom": "https://github.com/wenzetan/dsh-llm-newapi",
   "main": "lib/index.js",
