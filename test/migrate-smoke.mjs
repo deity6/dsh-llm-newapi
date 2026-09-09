@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import yaml from 'yaml'
 import { Config, instanceEntriesOf, routeOf, refOf, resolveAdapterOptions } from '../lib/index.js'
 
@@ -8,8 +10,15 @@ const check = (label, cond, extra = '') => {
   if (!cond) failures++
 }
 
-// 解析真实 settings.yaml 的 llm-newapi 段
-const raw = readFileSync('C:/Users/Deity/.dsh/settings.yaml', 'utf8')
+// 解析真实 settings.yaml 的 llm-newapi 段（本机回归；路径可经 DSH_SETTINGS_PATH 覆盖，
+// 文件不存在时跳过——CI 无本地配置，属于正常跳过而非失败）
+const settingsPath = process.env.DSH_SETTINGS_PATH ?? join(homedir(), '.dsh', 'settings.yaml')
+if (!existsSync(settingsPath)) {
+  console.log(`SKIP  ${settingsPath} 不存在 — 本机回归测试跳过`)
+  console.log('\nALL PASS ✅ (skipped)')
+  process.exit(0)
+}
+const raw = readFileSync(settingsPath, 'utf8')
 const doc = yaml.parse(raw)
 const section = Config(doc['llm-newapi'] ?? {})
 const entries = instanceEntriesOf(section)
