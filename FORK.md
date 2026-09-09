@@ -282,8 +282,8 @@ registerChannelConnParser('mygw_token', (obj) => {
     删除入口只在编辑页底部**危险区**（红字文字按钮 + 提示文案），防误触。
   - 按钮三态统一（primary 蓝底 / ghost 灰 / danger 红字），新增密钥/清空等
     操作用 primary 突出。
-  - 参考控件：`~/Desktop/skill/svg控件/` 的图标风格（圆形卡 + 单色描边），
-    实现用内联 SVG（零依赖）；协议/设置/删除/切换图标均有对应。
+  - 参考控件：内置图标风格（圆形卡 + 单色描边），实现用内联 SVG（零依赖）；
+    协议/设置/删除/切换图标均有对应。
   - 回归：client 16 例全绿（回收站测试适配新页面布局 + defaultEditIndex prop）；
     typecheck/build/全部 smoke 绿。浏览器实测（Edge CDP）：分段控件、实例卡、
     编辑页危险区、设置分区、回收站页全部渲染正常。
